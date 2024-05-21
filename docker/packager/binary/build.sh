@@ -46,11 +46,21 @@ ccache_status
 if [ -n "$MAKE_DEB" ]; then
   # No quotes because I want it to expand to nothing if empty.
   # shellcheck disable=SC2086
+  echo "debian build"
   DESTDIR=/build/packages/root ninja $NINJA_FLAGS install
   bash -x /build/packages/build
 fi
 
+ls -la /output
+
+echo "about to execute ninja install on /output"
+
 DESTDIR=/output ninja $NINJA_FLAGS install
+
+echo "done with ninja install on/output"
+
+ls -la /output
+
 # Folders structure looks like this:
 # /output
 #   etc/ (Needed by ByConity docker image)
@@ -62,6 +72,7 @@ DESTDIR=/output ninja $NINJA_FLAGS install
 #     usr/ (same as above)
 #   byconity-*** (Needed by GitHub Releases)
 #   unit_tests_dbms
+
 [ -x ./programs/self-extracting/clickhouse ] && mv ./programs/self-extracting/clickhouse /output
 mv ./src/unit_tests_dbms /output ||: # may not exist for some binary builds
 

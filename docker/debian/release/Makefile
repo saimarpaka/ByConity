@@ -25,8 +25,9 @@ image:
 
 image-github:
 	mkdir -p build_install
-	cp -ra ${BINARY_DIR}/usr/* ./build_install/
-	cp -ra ${BINARY_DIR}/etc ./build_install/
+	cp -ra ${BINARY_DIR}/usr/* ./build_install/ | tee 2>/dev/null
+	cp -ra ${BINARY_DIR}/etc ./build_install/   | tee 2>/dev/null
+	cp -ra ${BINARY_DIR} ./build_install
 	DOCKER_BUILDKIT=1 docker build -t byconity/byconity:${TAG} .
 
 release:

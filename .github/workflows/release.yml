@@ -23,16 +23,16 @@ jobs:
         with:
           submodules: recursive
           # Will be copied to volume's `/` path.
-          path: ByConity
+          path: '.'
       - name: Prepare for Build Binaries.
         run: |
           mkdir -p release-binary/output
           docker container create --name ${DUMMY_CONTAINER} -v ${SRC_VOL}:/build hello-world
-          docker cp ./ByConity/. ${DUMMY_CONTAINER}:/build/
+          docker cp . ${DUMMY_CONTAINER}:/build/
           docker rm ${DUMMY_CONTAINER}
       - name: Build All Binaries.
         run: |
-          ./ByConity/docker/packager/packager --output-dir /output --package-type deb --ccache_dir=${HOME}/.ccache_for_docker --additional-pkgs --version ${{ github.ref_name }} --build-type release --dind-mode
+          ./docker/packager/packager --output-dir /output --package-type deb --ccache_dir=${HOME}/.ccache_for_docker --additional-pkgs --version ${{ github.ref_name }} --build-type release --dind-mode
       - name: Copy Binaries out.
         run: |
           docker container create --name ${DUMMY_CONTAINER} -v ${OUTPUT_VOL}:/output hello-world
@@ -50,7 +50,7 @@ jobs:
           file_glob: true
       - name: Build Docker.
         run: |
-          cd ByConity/docker/debian/release
+          cd ./docker/debian/release
           BUILD_TYPE=Release CMAKE_FLAGS="-DENABLE_JAVA_EXTENSIONS=0" TAG=${{ github.ref_name }} make image-github
           cd -
           docker images

@@ -6,7 +6,7 @@ jobs:
   build:
     name: Build & Uploads Binaries & Images
     container: byconity/byconity-ci:llvm16
-    runs-on: self-hosted
+    #runs-on: self-hosted
     steps:
       - name: Setup Git Proxy.
         if: ${{ runner.name != 'ec2-aws-id4-10.10.129.157' }}

@@ -721,11 +721,8 @@ BlockIO InterpreterExplainQuery::explainAnalyze()
     {
         context_ptr->setSetting("log_processors_profiles", true);
         context_ptr->setSetting("report_processors_profiles", true);
+        context_ptr->setSetting("report_segment_profiles", true);
     }
-    std::shared_ptr<ProfileElementConsumer<ProcessorProfileLogElement>> consumer
-        = std::make_shared<ExplainConsumer>(context_ptr->getCurrentQueryId());
-    ProfileLogHub<ProcessorProfileLogElement>::getInstance().initLogChannel(context_ptr->getCurrentQueryId(), consumer);
-    context_ptr->setProcessorProfileElementConsumer(consumer);
     context_ptr->setIsExplainQuery(true);
     try
     {
@@ -734,8 +731,6 @@ BlockIO InterpreterExplainQuery::explainAnalyze()
     }
     catch (...)
     {
-        if (context_ptr->getProcessorProfileElementConsumer())
-            context_ptr->getProcessorProfileElementConsumer()->stop();
         throw;
     }
 
@@ -751,7 +746,7 @@ void InterpreterExplainQuery::explainPlanWithOptimizer(
     if (settings.json)
     {
         auto plan_cost = CostCalculator::calculatePlanCost(plan, *context_ptr);
-        buffer << PlanPrinter::jsonLogicalPlan(plan, plan_cost, {}, costs, settings);
+        buffer << PlanPrinter::jsonLogicalPlan(plan, plan_cost, CostModel(*context_ptr), {}, costs, settings);
     }
     else if (settings.pb_json)
     {

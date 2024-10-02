@@ -610,6 +610,7 @@ PlanNodePtr ColumnPruningVisitor::visitTableScanNode(TableScanNode & node, Colum
         step->getQueryInfo(),
         step->getMaxBlockSize(),
         step->getTableAlias(),
+        step->isBucketScan(),
         step->getHints(),
         inline_expressions);
 
@@ -641,10 +642,10 @@ PlanNodePtr ColumnPruningVisitor::visitAggregatingNode(AggregatingNode & node, C
     auto child = VisitorUtil::accept(node.getChildren()[0], *this, child_column_pruning_context);
     if (aggs.empty() && step->getKeys().empty())
     {
-        auto [symbol, node] = createDummyPlanNode(context);
+        auto [symbol, plan_node] = createDummyPlanNode(context);
         (void)symbol;
         // require_.insert(symbol);
-        return node;
+        return plan_node;
     }
 
     Names new_keys;
@@ -849,6 +850,7 @@ PlanNodePtr ColumnPruningVisitor::visitJoinNode(JoinNode & node, ColumnPruningCo
         step->getKeepLeftReadInOrder(),
         step->getLeftKeys(),
         step->getRightKeys(),
+        step->getKeyIdsNullSafe(),
         step->getFilter(),
         step->isHasUsing(),
         step->getRequireRightKeys(),

@@ -314,7 +314,6 @@ int HDFSFileSystem::open(const std::string& path, int flags, mode_t mode)
 int HDFSFileSystem::getNextFd(const std::string& path) {
     // SKIP_FD_NUM to (SKIP_FD_NUM + MAX_FD_NUM)
     int index = std::hash<std::string>{}(path) % MAX_FD_NUM;
-    auto dumpy = 0;
     auto i = 0;
     // if flag_ has been set by others, we wait for next cycle
     while (flag_.test_and_set(std::memory_order_acquire))
@@ -323,11 +322,6 @@ int HDFSFileSystem::getNextFd(const std::string& path) {
         if (i < 32)
         {
             continue;
-        }
-        else if (i < 100)
-        {
-            dumpy = i;
-            dumpy++;
         }
         else
         {
@@ -997,6 +991,7 @@ HDFSBuilderPtr HDFSConnectionParams::createBuilder(const Poco::URI & uri) const
     // construct from uri.
     // uri is hdfs://host:ip/a/b or hdfs://my-hadoop/a/b
 
+    LOG_DEBUG(&Poco::Logger::get("HDFSConnectionParams"), "use nnproxy ha config: {}", toString());
     auto raw_builder = hdfsNewBuilder();
     if (raw_builder == nullptr)
         throw Exception("Unable to create HDFS builder, maybe hdfs3.xml missing" , ErrorCodes::BAD_ARGUMENTS);
@@ -1033,11 +1028,13 @@ HDFSBuilderPtr HDFSConnectionParams::createBuilder(const Poco::URI & uri) const
             auto addrs_from_nnproxy = lookupAndShuffle();
             if (use_nnproxy_ha)
             {
+                LOG_DEBUG(&Poco::Logger::get("HDFSConnectionParams"), "use nnproxy ha config");
                 setHdfsHaConfig(builder, hdfs_service, hdfs_user, addrs_from_nnproxy);
                 return builder;
             }
             else
             {
+                LOG_DEBUG(&Poco::Logger::get("HDFSConnectionParams"), "use none nnproxy ha config");
                 IpWithPort targetNode = addrs_from_nnproxy[0];
                 setHdfsDirectConfig(builder, hdfs_user, "hdfs://" + std::get<0>(safeNormalizeHost(targetNode.first)), targetNode.second);
                 return builder;

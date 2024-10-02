@@ -36,6 +36,8 @@ namespace DB
 {
 using RuntimeFilterId = UInt32;
 
+ENUM_WITH_PROTO_CONVERTER(ReportProfileType, Protos::ReportProfileType, (Unspecified, 0), (QueryPlan, 1), (QueryPipeline, 2));
+
 /**
  * SOURCE means the plan is the leaf of a plan segment tree, i.g. TableScan Node.
  * EXCHANGE always marking the plan that need to repartiton the data.
@@ -75,6 +77,7 @@ public:
     IPlanSegment(const Block & header_, const PlanSegmentType & type_)
     : header(header_), type(type_) {}
 
+    IPlanSegment(const IPlanSegment &) = default;
     virtual ~IPlanSegment() = default;
 
     Block getHeader() const { return header; }
@@ -333,6 +336,10 @@ public:
     const std::unordered_set<RuntimeFilterId> & getRuntimeFilters() const { return runtime_filters; }
 
     static void getRemoteSegmentId(const QueryPlan::Node * node, std::unordered_map<PlanNodeId, size_t> & exchange_to_segment);
+
+    void setProfileType(const ReportProfileType & type) { profile_type = type; }
+
+    ReportProfileType getProfileType() const { return profile_type; }
 private:
     size_t segment_id;
     String query_id;
@@ -348,6 +355,8 @@ private:
     size_t exchange_parallel_size;
 
     std::unordered_set<RuntimeFilterId> runtime_filters;
+
+    ReportProfileType profile_type = ReportProfileType::Unspecified;
 };
 
 class PlanSegmentTree

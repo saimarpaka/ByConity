@@ -59,6 +59,7 @@
 #include <Storages/RemoteFile/IStorageCnchFile.h>
 #include <Storages/StorageCloudMergeTree.h>
 #include <Storages/StorageReplicatedMergeTree.h>
+#include <Storages/StorageSnapshot.h>
 #include <Storages/VirtualColumnUtils.h>
 #include <fmt/format.h>
 #include <Common/FieldVisitorToString.h>
@@ -781,6 +782,7 @@ TableScanStep::TableScanStep(
     const SelectQueryInfo & query_info_,
     size_t max_block_size_,
     String alias_,
+    bool bucket_scan_,
     PlanHints hints_,
     Assignments inline_expressions_,
     std::shared_ptr<AggregatingStep> aggregation_,
@@ -795,6 +797,7 @@ TableScanStep::TableScanStep(
     , pushdown_aggregation(std::move(aggregation_))
     , pushdown_projection(std::move(projection_))
     , pushdown_filter(std::move(filter_))
+    , bucket_scan(bucket_scan_)
     , alias(alias_)
     , log(&Poco::Logger::get("TableScanStep"))
 {
@@ -901,7 +904,7 @@ TableScanStep::TableScanStep(
         column_names.emplace_back(item.first);
     }
 
-    if (storage_id.empty() && context->getSettingsRef().enable_prune_empty_resource)
+    if (storage_id.empty() && context->getSettingsRef().enable_prune_source_plan_segment)
     {
         LOG_DEBUG(log, "Create tableScanStep without storage");
         is_null_source = true;
@@ -1339,7 +1342,9 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
             cloud_merge_tree->source_task_filter = build_context.distributed_settings.source_task_filter;
         }
         // flag = Output
-        auto pipe = storage->read(
+        QueryPlan storage_plan;
+        storage->read(
+            storage_plan,
             getRequiredColumns(),
             storage_snapshot,
             query_info,
@@ -1347,6 +1352,23 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
             QueryProcessingStage::Enum::FetchColumns,
             max_block_size,
             max_streams);
+        auto pipe = storage_plan.convertToPipe(
+            QueryPlanOptimizationSettings::fromContext(build_context.context),
+            BuildQueryPipelineSettings::fromContext(build_context.context));
+
+        {
+            for (auto & node : storage_plan.getNodes())
+            {
+                auto & att_descs = node.step->getAttributeDescriptions();
+                if (att_descs.empty())
+                    continue;
+                for (auto & desc : att_descs)
+                {
+                    if (!attribute_descriptions.contains(desc.first))
+                        attribute_descriptions.emplace(desc.first, desc.second);
+                }
+            }
+        }
 
         if (pipe.getCacheHolder())
             pipeline.addCacheHolder(pipe.getCacheHolder());
@@ -1615,6 +1637,9 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
             step_desc << plan_element.part_group.partsNum() << " parts from raw data";
     }
     setStepDescription(step_desc.str());
+    RuntimeAttributeDescription tablescan_desc;
+    tablescan_desc.description = step_desc.str();
+    attribute_descriptions.emplace("TableScanDescription", tablescan_desc);
 
     LOG_DEBUG(log, "init pipeline total run time: {} ms, table scan descriptiion: {}", total_watch.elapsedMillisecondsAsDouble(), step_desc.str());
 }
@@ -1622,11 +1647,11 @@ void TableScanStep::initializePipeline(QueryPipeline & pipeline, const BuildQuer
 void TableScanStep::toProto(Protos::TableScanStep & proto, bool) const
 {
     storage_id.toProto(*proto.mutable_storage_id());
-    for (auto & [name, alias] : column_alias)
+    for (auto & [name, c_alias] : column_alias)
     {
         auto proto_element = proto.add_column_alias();
         proto_element->set_name(name);
-        proto_element->set_alias(alias);
+        proto_element->set_alias(c_alias);
     }
 
     query_info.toProto(*proto.mutable_query_info());
@@ -1655,7 +1680,7 @@ void TableScanStep::toProto(Protos::TableScanStep & proto, bool) const
 
 std::shared_ptr<TableScanStep> TableScanStep::fromProto(const Protos::TableScanStep & proto, ContextPtr context)
 {
-    auto storage_id = context->getSettingsRef().enable_prune_empty_resource ? StorageID::tryFromProto(proto.storage_id(), context)
+    auto storage_id = context->getSettingsRef().enable_prune_source_plan_segment ? StorageID::tryFromProto(proto.storage_id(), context)
                                                                             : StorageID::fromProto(proto.storage_id(), context);
     NamesWithAliases column_alias;
     for (const auto & proto_element : proto.column_alias())
@@ -1729,6 +1754,7 @@ std::shared_ptr<IQueryPlanStep> TableScanStep::copy(ContextPtr) const
         copy_query_info,
         max_block_size,
         alias,
+        bucket_scan,
         hints,
         inline_expressions,
         pushdown_aggregation,
@@ -2074,6 +2100,7 @@ void TableScanStep::fillQueryInfoV2(ContextPtr context)
     /// 4. build index context
     query_info.index_context = std::make_shared<MergeTreeIndexContext>();
 }
+
 
 void TableScanStep::initMetadataAndStorageSnapshot(ContextPtr context)
 {

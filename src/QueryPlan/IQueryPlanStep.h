@@ -14,6 +14,7 @@
  */
 
 #pragma once
+#include <utility>
 #include <Core/Block.h>
 #include <Core/SortDescription.h>
 #include <Interpreters/prepared_statement.h>
@@ -117,6 +118,19 @@ using ContextPtr = std::shared_ptr<const Context>;
 
 using PlanHints = std::vector<PlanHintPtr>;
 
+struct RuntimeAttributeDescription
+{
+    String description;
+    std::vector<std::pair<String, String>> name_and_detail;
+
+    // If the attribute information is complex, can use json
+    String additional;
+
+    void fillFromProto(const Protos::RuntimeAttributeDescription & proto);
+    void toProto(Protos::RuntimeAttributeDescription & proto) const;
+};
+
+
 /// Single step of query plan.
 class IQueryPlanStep
 {
@@ -212,6 +226,9 @@ public:
 
 #undef ENUM_DEF
 
+    IQueryPlanStep() = default;
+    IQueryPlanStep(const IQueryPlanStep &) = default;
+    IQueryPlanStep & operator=(IQueryPlanStep &) = default;
     virtual ~IQueryPlanStep() = default;
 
     virtual String getName() const = 0;
@@ -302,6 +319,12 @@ public:
     virtual void prepare(const PreparedStatementContext &)
     {
     }
+
+    std::unordered_map<String, RuntimeAttributeDescription> & getAttributeDescriptions()
+    {
+        return attribute_descriptions;
+    }
+
 protected:
     DataStreams input_streams;
     std::optional<DataStream> output_stream;
@@ -309,6 +332,9 @@ protected:
     /// Text description about what current step does.
     std::string step_description;
     PlanHints hints;
+
+    /// Text description of runtime attributes
+    std::unordered_map<String, RuntimeAttributeDescription> attribute_descriptions;
 
     static void describePipeline(const Processors & processors, FormatSettings & settings);
 };

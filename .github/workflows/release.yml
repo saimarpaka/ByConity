@@ -61,12 +61,12 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Push Dockers.
         run: |
-          docker push byconity/byconity:${{ github.ref_name }}
+          docker push saimarpaka/byconity:${{ github.ref_name }}
       - name: Tag as Stable then push to Docker Hub.
         if: "!github.event.release.prerelease"
         run: |
-          docker tag byconity/byconity:${{ github.ref_name }} byconity/byconity:stable
-          docker push byconity/byconity:stable
+          docker tag saimarpaka/byconity:${{ github.ref_name }} byconity/byconity:stable
+          docker push saimarpaka/byconity:stable
           docker image rm -f saimarpaka/byconity:stable
       - name: Cleanup Data.
         if: always()
@@ -75,6 +75,6 @@ jobs:
           docker volume rm ${SRC_VOL}
           docker volume rm ${OUTPUT_VOL}
           docker volume prune -f
-          docker image rm -f byconity/byconity:${{ github.ref_name }}
+          docker image rm -f saimarpaka/byconity:${{ github.ref_name }}
           docker container prune -f
           docker network prune -f

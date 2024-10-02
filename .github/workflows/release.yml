@@ -67,7 +67,7 @@ jobs:
         run: |
           docker tag byconity/byconity:${{ github.ref_name }} byconity/byconity:stable
           docker push byconity/byconity:stable
-          docker image rm -f byconity/byconity:stable
+          docker image rm -f saimarpaka/byconity:stable
       - name: Cleanup Data.
         if: always()
         run: |

@@ -432,16 +432,17 @@ public:
 
     void ALWAYS_INLINE pushData(Data data_)
     {
-        if (unlikely(!data_.exception && header.columns() && data_.chunk.getNumColumns() != header.columns()))
+        if (unlikely(!data_.exception && data_.chunk.getNumColumns() != header.columns()))
         {
-            String msg = "Invalid number of columns in chunk pushed to OutputPort. Expected "
-                         + std::to_string(header.columns())
-                         + ", found " + std::to_string(data_.chunk.getNumColumns()) + '\n';
-
-            msg += "Header: " + header.dumpStructure() + '\n';
-            msg += "Chunk: " + data_.chunk.dumpStructure() + '\n';
-
-            throw Exception(msg, ErrorCodes::LOGICAL_ERROR);
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "Invalid number of columns in chunk pushed to OutputPort. Expected {}, found {}\n"
+                "Header: {}\n"
+                "Chunk: {}\n",
+                header.columns(),
+                data_.chunk.getNumColumns(),
+                header.dumpStructure(),
+                data_.chunk.dumpStructure());
         }
 
         updateVersion();

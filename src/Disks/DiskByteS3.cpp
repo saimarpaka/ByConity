@@ -15,21 +15,24 @@
 
 #include <filesystem>
 #include <Disks/DiskByteS3.h>
+#include <Disks/DiskFactory.h>
 #include <common/logger_useful.h>
 #include <Common/filesystemHelpers.h>
 #include <Common/quoteString.h>
 #include <Common/formatReadable.h>
 #include "IO/ReadSettings.h"
 #include <Disks/IO/AsynchronousBoundedReadBuffer.h>
-#include <IO/Scheduler/IOScheduler.h>
+#include <IO/PFRAWSReadBufferFromFS.h>
+#include <IO/RAReadBufferFromS3.h>
+#include <IO/ReadBufferFromS3.h>
+#include <IO/ReadBufferFromNexusFS.h>
+#include <IO/ReadSettings.h>
 #include <IO/S3Common.h>
 #include <IO/S3RemoteFSReader.h>
 #include <IO/ReadBufferFromS3.h>
 #include <IO/PFRAWSReadBufferFromFS.h>
 #include <IO/WSReadBufferFromFS.h>
-#include <Disks/DiskFactory.h>
-#include <IO/RAReadBufferFromS3.h>
-#include <IO/WriteBufferFromByteS3.h>
+#include <IO/WriteBufferFromS3.h>
 #include <Interpreters/Context.h>
 
 namespace DB
@@ -100,7 +103,7 @@ private:
     std::filesystem::path prefix;
     size_t idx {0};
 
-    Poco::Logger * log {&Poco::Logger::get("DiskByteS3DirectoryIterator")};
+    LoggerPtr log{getLogger("DiskByteS3DirectoryIterator")};
 };
 
 class DiskByteS3Reservation : public IReservation
@@ -207,6 +210,17 @@ void DiskByteS3::listFiles(const String& path, std::vector<String>& file_names)
 
 std::unique_ptr<ReadBufferFromFileBase> DiskByteS3::readFile(const String & path, const ReadSettings & settings) const
 {
+    if (unlikely(settings.remote_fs_read_failed_injection != 0))
+    {
+        if (settings.remote_fs_read_failed_injection == -1)
+            throw Exception("remote_fs_read_failed_injection is enabled and return error immediately", ErrorCodes::LOGICAL_ERROR);
+        else
+        {
+            LOG_TRACE(log, "remote_fs_read_failed_injection is enabled and will sleep {}ms", settings.remote_fs_read_failed_injection);
+            std::this_thread::sleep_for(std::chrono::milliseconds(settings.remote_fs_read_failed_injection));
+        }
+    }
+
     String object_key = std::filesystem::path(root_prefix) / path;
     if (IO::Scheduler::IOSchedulerSet::instance().enabled() && settings.enable_io_scheduler) {
         if (settings.enable_io_pfra) {
@@ -233,7 +247,21 @@ std::unique_ptr<ReadBufferFromFileBase> DiskByteS3::readFile(const String & path
     {
         ReadSettings modified_settings{settings};
         modified_settings.for_disk_s3 = true;
-        if (settings.remote_fs_prefetch)
+        auto nexus_fs = settings.enable_nexus_fs ? Context::getGlobalContextInstance()->getNexusFS() : nullptr;
+        bool use_external_buffer = nexus_fs ? false : settings.remote_fs_prefetch;
+        std::unique_ptr<ReadBufferFromFileBase> impl;
+        impl = std::make_unique<ReadBufferFromS3>(
+            s3_util.getClient(), s3_util.getBucket(), object_key, modified_settings, 3, false, use_external_buffer);
+
+        if (nexus_fs)
+        {
+            impl = std::make_unique<ReadBufferFromNexusFS>(
+                settings.local_fs_buffer_size,
+                settings.remote_fs_prefetch,
+                std::move(impl),
+                *nexus_fs);
+        }
+        else if (settings.remote_fs_prefetch)
         {
             auto impl = std::make_unique<ReadBufferFromS3>(s3_util.getClient(),
                 s3_util.getBucket(), object_key, modified_settings, 3, false, /* use_external_buffer */true);
@@ -253,18 +281,32 @@ std::unique_ptr<ReadBufferFromFileBase> DiskByteS3::readFile(const String & path
 std::unique_ptr<WriteBufferFromFileBase> DiskByteS3::writeFile(const String & path, const WriteSettings & settings)
 {
     assertNotReadonly();
-    return std::make_unique<WriteBufferFromByteS3>(
-        s3_util.getClient(),
-        s3_util.getBucket(),
-        std::filesystem::path(root_prefix) / path,
-        max_single_part_upload_size,
-        min_upload_part_size,
-        settings.file_meta,
-        settings.buffer_size,
-        false,
-        nullptr,
-        0,
-        true);
+
+    if (unlikely(settings.remote_fs_write_failed_injection != 0))
+    {
+        if (settings.remote_fs_write_failed_injection == -1)
+            throw Exception("remote_fs_write_failed_injection is enabled and return error immediately", ErrorCodes::LOGICAL_ERROR);
+        else
+        {
+            LOG_TRACE(log, "remote_fs_write_failed_injection is enabled and will sleep {}ms", settings.remote_fs_write_failed_injection);
+            std::this_thread::sleep_for(std::chrono::milliseconds(settings.remote_fs_write_failed_injection));
+        }
+    }
+
+    {
+        return std::make_unique<WriteBufferFromS3>(
+            s3_util.getClient(),
+            s3_util.getBucket(),
+            std::filesystem::path(root_prefix) / path,
+            max_single_part_upload_size,
+            min_upload_part_size,
+            settings.file_meta,
+            settings.buffer_size,
+            false,
+            false,
+            8,
+            true);
+    }
 }
 
 void DiskByteS3::removeFile(const String& path)
@@ -293,9 +335,16 @@ void DiskByteS3::removeRecursive(const String& path)
     assertNotReadonly();
     String prefix = std::filesystem::path(root_prefix) / path;
 
-    LOG_TRACE(&Poco::Logger::get("DiskByteS3"), "RemoveRecursive: {} - {}", prefix, path);
+    LOG_TRACE(log, "RemoveRecursive: {} - {}", prefix, path);
 
     s3_util.deleteObjectsWithPrefix(prefix, [](const S3::S3Util&, const String&){return true;});
+}
+
+void DiskByteS3::copyFile(const String & from_path, const String & to_bucket, const String & to_path)
+{
+    String full_from_path = std::filesystem::path(root_prefix) / from_path;
+    s3_util.copyObject(full_from_path, to_bucket, to_path);
+    LOG_TRACE(log, "Copy file from {} to {}", from_path, to_path);
 }
 
 static void checkWriteAccess(IDisk & disk)

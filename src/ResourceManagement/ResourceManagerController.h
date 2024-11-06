@@ -15,10 +15,12 @@
 
 #pragma once
 
-#include <Common/HostWithPorts.h>
-#include <Common/Config/ConfigProcessor.h>
 #include <Interpreters/Context_fwd.h>
 #include <ResourceManagement/CommonData.h>
+#include <ResourceManagement/ResourceScheduler.h>
+#include <Common/Config/ConfigProcessor.h>
+#include <Common/HostWithPorts.h>
+#include <Common/Logger.h>
 
 #include <memory>
 
@@ -42,7 +44,6 @@ class VirtualWarehouseManager;
 class WorkerGroupManager;
 class ResourceTracker;
 class ElectionController;
-class WorkerGroupResourceCoordinator;
 class IWorkerGroup;
 using WorkerGroupPtr = std::shared_ptr<IWorkerGroup>;
 struct ResourceCoordinateDecision;
@@ -51,7 +52,7 @@ using CoordinateDecisions = std::vector<ResourceCoordinateDecision>;
 class ResourceManagerController : public WithContext, private boost::noncopyable
 {
 public:
-    ResourceManagerController(ContextPtr global_context_);
+    explicit ResourceManagerController(ContextPtr global_context_);
     ~ResourceManagerController();
 
     Catalog::CatalogPtr getCnchCatalog();
@@ -60,11 +61,14 @@ public:
 
     void initialize();
 
+    auto & getResourceScheduler()
+    {
+        return *resource_scheduler;
+    }
     auto & getResourceTracker() { return *resource_tracker; }
     auto & getVirtualWarehouseManager() { return *vw_manager; }
     auto & getWorkerGroupManager() { return *group_manager; }
     auto & getElectionController() { return *election_controller; }
-    auto & getWorkerGroupResourceCoordinator() { return *wg_resource_coordinator; }
 
     void registerWorkerNode(const WorkerNodeResourceData & data); // RPC
     void removeWorkerNode(const std::string & worker_id, const std::string & vw_name, const std::string & group_id);
@@ -82,16 +86,13 @@ public:
         std::lock_guard<bthread::Mutex> * vw_lock = nullptr,
         std::lock_guard<bthread::Mutex> * wg_lock = nullptr);
 
-    CoordinateDecisions swapCoordinateDecisions();
-
-
 private:
-    Poco::Logger * log{nullptr};
+    LoggerPtr log{nullptr};
 
+    std::unique_ptr<ResourceScheduler> resource_scheduler;
     std::unique_ptr<ResourceTracker> resource_tracker;
     std::unique_ptr<VirtualWarehouseManager> vw_manager;
     std::unique_ptr<WorkerGroupManager> group_manager;
-    std::unique_ptr<WorkerGroupResourceCoordinator> wg_resource_coordinator;
     std::unique_ptr<ElectionController> election_controller;
 };
 

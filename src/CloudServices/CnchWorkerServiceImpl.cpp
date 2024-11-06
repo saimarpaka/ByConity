@@ -50,16 +50,19 @@
 
 #include <condition_variable>
 #include <mutex>
+#include <Storages/ColumnsDescription.h>
 #include <brpc/closure_guard.h>
 #include <brpc/controller.h>
 #include <brpc/stream.h>
 #include <Common/Configurations.h>
-#include <Storages/ColumnsDescription.h>
 #include <Common/Exception.h>
+#include <IO/copyData.h>
 #include <CloudServices/CnchDedupHelper.h>
+#include <CloudServices/ManifestCache.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH_fwd.h>
 #include <Core/SettingsEnums.h>
 #include <MergeTreeCommon/GlobalDataManager.h>
+#include <Backups/BackupUtils.h>
 
 #if USE_RDKAFKA
 #    include <Storages/Kafka/KafkaTaskCommand.h>
@@ -101,7 +104,7 @@ namespace ErrorCodes
 
 CnchWorkerServiceImpl::CnchWorkerServiceImpl(ContextMutablePtr context_)
     : WithMutableContext(context_->getGlobalContext())
-    , log(&Poco::Logger::get("CnchWorkerService"))
+    , log(getLogger("CnchWorkerService"))
     , thread_pool(getNumberOfPhysicalCPUCores() * 4, getNumberOfPhysicalCPUCores() * 2, getNumberOfPhysicalCPUCores() * 8)
 {
 }
@@ -527,7 +530,7 @@ void CnchWorkerServiceImpl::checkDataParts(
                 try
                 {
                     // TODO: checkDataParts(part);
-                    dynamic_cast<MergeTreeDataPartCNCH*>(part.get())->loadFromFileSystem(storage.get());
+                    dynamic_cast<MergeTreeDataPartCNCH*>(part.get())->loadFromFileSystem();
                     is_passed = true;
                     message.clear();
                 }
@@ -566,13 +569,14 @@ void CnchWorkerServiceImpl::preloadDataParts(
         LOG_TRACE(
             log,
             "Receiving preload parts task level = {}, sync = {}, current table preload setting: parts_preload_level = {}, "
-            "enable_preload_parts = {}, enable_parts_sync_preload = {}, enable_local_disk_cache = {}",
+            "enable_preload_parts = {}, enable_parts_sync_preload = {}, enable_local_disk_cache = {}, enable_nexus_fs = {}",
             request->preload_level(),
             request->sync(),
             cloud_merge_tree.getSettings()->parts_preload_level.value,
             cloud_merge_tree.getSettings()->enable_preload_parts.value,
             cloud_merge_tree.getSettings()->enable_parts_sync_preload,
-            cloud_merge_tree.getSettings()->enable_local_disk_cache);
+            cloud_merge_tree.getSettings()->enable_local_disk_cache,
+            cloud_merge_tree.getSettings()->enable_nexus_fs);
 
         if (!request->preload_level()
             || (!cloud_merge_tree.getSettings()->parts_preload_level && !cloud_merge_tree.getSettings()->enable_preload_parts))
@@ -580,6 +584,7 @@ void CnchWorkerServiceImpl::preloadDataParts(
 
         auto preload_level = request->preload_level();
         auto submit_ts = request->submit_ts();
+        auto read_injection = request->read_injection();
 
         if (request->sync())
         {
@@ -587,7 +592,8 @@ void CnchWorkerServiceImpl::preloadDataParts(
             auto pool = std::make_unique<ThreadPool>(std::min(data_parts.size(), settings.cnch_parallel_preloading.value));
             for (const auto & part : data_parts)
             {
-                pool->scheduleOrThrowOnError([part, preload_level, submit_ts, storage] {
+                pool->scheduleOrThrowOnError([part, preload_level, submit_ts, read_injection, storage] {
+                    part->remote_fs_read_failed_injection = read_injection;
                     part->disk_cache_mode = DiskCacheMode::SKIP_DISK_CACHE;// avoid getCheckum & getIndex re-cache
                     part->preload(preload_level, submit_ts);
                 });
@@ -606,7 +612,8 @@ void CnchWorkerServiceImpl::preloadDataParts(
             ThreadPool * preload_thread_pool = &(IDiskCache::getPreloadPool());
             for (const auto & part : data_parts)
             {
-                preload_thread_pool->scheduleOrThrowOnError([part, preload_level, submit_ts, storage] {
+                preload_thread_pool->scheduleOrThrowOnError([part, preload_level, submit_ts, read_injection, storage] {
+                    part->remote_fs_read_failed_injection = read_injection;
                     part->disk_cache_mode = DiskCacheMode::SKIP_DISK_CACHE;// avoid getCheckum & getIndex re-cache
                     part->preload(preload_level, submit_ts);
                 });
@@ -1074,6 +1081,68 @@ void CnchWorkerServiceImpl::dropDedupWorker(
     })
 }
 
+void CnchWorkerServiceImpl::sendBackupCopyTask(
+    google::protobuf::RpcController *,
+    const Protos::SendBackupCopyTaskReq * request,
+    Protos::SendBackupCopyTaskResp * response,
+    google::protobuf::Closure * done)
+{
+    // backup copy task will hang for a while, so we use separate thread pool to execute it
+    {
+        std::lock_guard lock(backup_lock);
+        if (!backup_rpc_pool)
+            backup_rpc_pool = std::make_unique<ThreadPool>(8, 8, 16, false);
+    }
+    try
+    {
+        backup_rpc_pool->scheduleOrThrowOnError([=, this]() {
+            brpc::ClosureGuard done_guard(done);
+            bool finished = false;
+            const auto & backup_tasks = request->backup_task();
+            try
+            {
+                // Check if the backup task is aborted before and after copying data
+                checkBackupTaskNotAborted(request->id(), getContext());
+                ThreadPool copy_pool(std::min(16, backup_tasks.size()));
+                for (const auto & backup_task : backup_tasks)
+                {
+                    copy_pool.scheduleOrThrowOnError([&, backup_task]() {
+                        setThreadName("BackupCopyThr");
+                        DiskPtr source_disk = getContext()->getDisk(backup_task.source_disk());
+                        DiskPtr destination_disk = getContext()->getDisk(backup_task.destination_disk());
+                        auto read_buffer = source_disk->readFile(backup_task.source_path());
+                        auto write_buffer = destination_disk->writeFile(backup_task.destination_path());
+                        copyData(*read_buffer, *write_buffer);
+                        write_buffer->finalize();
+                    });
+                }
+                copy_pool.wait();
+                finished = true;
+                checkBackupTaskNotAborted(request->id(), getContext());
+            }
+            catch (...)
+            {
+                if (finished)
+                {
+                    for (const auto & backup_task : backup_tasks)
+                    {
+                        DiskPtr destination_disk = getContext()->getDisk(backup_task.destination_disk());
+                        destination_disk->removeFileIfExists(backup_task.destination_path());
+                    }
+                }
+                tryLogCurrentException(log, __PRETTY_FUNCTION__);
+                RPCHelpers::handleException(response->mutable_exception());
+            }
+        });
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, __PRETTY_FUNCTION__);
+        RPCHelpers::handleException(response->mutable_exception());
+        done->Run();
+    }
+}
+
 void CnchWorkerServiceImpl::getDedupWorkerStatus(
     google::protobuf::RpcController *,
     const Protos::GetDedupWorkerStatusReq * request,
@@ -1343,6 +1412,36 @@ void CnchWorkerServiceImpl::getCloudMergeTreeStatus(
     Protos::GetCloudMergeTreeStatusResp * response,
     google::protobuf::Closure * done)
 {
+}
+
+void CnchWorkerServiceImpl::broadcastManifest(
+    [[maybe_unused]] google::protobuf::RpcController * cntl,
+    [[maybe_unused]] const Protos::BroadcastManifestReq * request,
+    [[maybe_unused]] Protos::BroadcastManifestResp * response,
+    [[maybe_unused]] google::protobuf::Closure * done
+)
+{
+    SUBMIT_THREADPOOL({
+        const UUID storage_uuid = RPCHelpers::createUUID(request->table_uuid());
+        const UInt64 txn_id = request->txn_id();
+        //WGWorkerInfoPtr worker_info = RPCHelpers::createWorkerInfo(request->worker_info());
+        DataModelPartPtrVector part_models;
+        DataModelDeleteBitmapPtrVector delete_bitmap_models;
+
+        for (const auto & part : request->parts())
+        {
+            DataModelPartPtr part_model = std::make_shared<Protos::DataModelPart>(part);
+            part_models.push_back(part_model);
+        }
+
+        for (const auto & dbm : request->delete_bitmaps())
+        {
+            DataModelDeleteBitmapPtr dbm_model = std::make_shared<DataModelDeleteBitmap>(dbm);
+            delete_bitmap_models.push_back(dbm_model);
+        }
+
+        getContext()->getManifestCache()->addManifest(storage_uuid, txn_id, std::move(part_models), std::move(delete_bitmap_models));
+    })
 }
 
 #if defined(__clang__)

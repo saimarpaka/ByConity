@@ -77,6 +77,7 @@
 #include <Statistics/CacheManager.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Storages/DiskCache/NvmCache.h>
+#include <Storages/NexusFS/NexusFS.h>
 #include <Storages/HDFS/HDFSCommon.h>
 #include <Storages/HDFS/HDFSFileSystem.h>
 #include <Storages/StorageReplicatedMergeTree.h>
@@ -89,7 +90,7 @@
 #include <Formats/registerFormats.h>
 #include <Storages/registerStorages.h>
 #include <Storages/MergeTree/ChecksumsCache.h>
-#include <Storages/MergeTree/GinIndexStore.h>
+#include <Storages/MergeTree/GINStoreReader.h>
 #include <TableFunctions/registerTableFunctions.h>
 #include <brpc/server.h>
 #include <google/protobuf/service.h>
@@ -324,7 +325,7 @@ static std::string getUserName(uid_t user_id)
     return toString(user_id);
 }
 
-Poco::Net::SocketAddress makeSocketAddress(const std::string & host, UInt16 port, Poco::Logger * log)
+Poco::Net::SocketAddress makeSocketAddress(const std::string & host, UInt16 port, LoggerPtr log)
 {
     Poco::Net::SocketAddress socket_address;
     try
@@ -354,7 +355,7 @@ Poco::Net::SocketAddress makeSocketAddress(const std::string & host, UInt16 port
 
 Poco::Net::SocketAddress Server::socketBindListen(Poco::Net::ServerSocket & socket, const std::string & host, UInt16 port, [[maybe_unused]] bool secure) const
 {
-    auto address = makeSocketAddress(host, port, &logger());
+    auto address = makeSocketAddress(host, port, getLogger(logger()));
 #if !defined(POCO_CLICKHOUSE_PATCH) || POCO_VERSION < 0x01090100
     if (secure)
         /// Bug in old (<1.9.1) poco, listen() after bind() with reusePort param will fail because have no implementation in SecureServerSocketImpl
@@ -402,7 +403,7 @@ static void clearOldStoreDirectory(const DisksMap& disk_map)
 
             try
             {
-                LOG_DEBUG(&Poco::Logger::get(__func__), "Removing {} from disk {}",
+                LOG_DEBUG(getLogger(__func__), "Removing {} from disk {}",
                     String(fs::path(disk->getPath()) / iter->path()), disk->getName());
                 disk->removeRecursive(iter->path());
             }
@@ -507,7 +508,7 @@ void checkForUsersNotInMainConfig(
     const Poco::Util::AbstractConfiguration & config,
     const std::string & config_path,
     const std::string & users_config_path,
-    Poco::Logger * log)
+    LoggerPtr log)
 {
     if (config.getBool("skip_check_for_incorrect_settings", false))
         return;
@@ -538,7 +539,7 @@ void checkForUsersNotInMainConfig(
 
 void huallocLogPrint(std::string s)
 {
-    static Poco::Logger * logger = &Poco::Logger::get("HuallocDebug");
+    static LoggerPtr logger = getLogger("HuallocDebug");
     LOG_INFO(logger, s);
 }
 
@@ -570,7 +571,7 @@ void limitMemoryCacheDefaultMaxRatio(RootConfiguration & root_config, const UInt
 
     Float32 max_total_ratio = root_config.cache_size_to_ram_max_ratio.value;
     Float32 lowered_ratio = (total_ratio > max_total_ratio ? max_total_ratio / total_ratio : 1.0f);
-    Poco::Logger * logger = &Poco::Logger::get("MemoryCacheDefaultRatioLimit");
+    auto logger = getLogger("MemoryCacheDefaultRatioLimit");
 
     LOG_INFO(logger, "Total memory {}, max ratio for memory cache is {}{}",
         formatReadableSizeWithBinarySuffix(memory_amount), max_total_ratio,
@@ -600,7 +601,7 @@ void limitMemoryCacheDefaultMaxRatio(RootConfiguration & root_config, const UInt
 
 int Server::main(const std::vector<std::string> & /*args*/)
 {
-    Poco::Logger * log = &logger();
+    LoggerPtr log = getLogger(logger());
 
     UseSSL use_ssl;
 
@@ -1277,7 +1278,8 @@ int Server::main(const std::vector<std::string> & /*args*/)
         LOG_INFO(log, "Uncompressed cache size was lowered to {} because the system has low amount of memory",
             formatReadableSizeWithBinarySuffix(uncompressed_cache_size));
     }
-    global_context->setUncompressedCache(uncompressed_cache_size);
+
+    global_context->setUncompressedCache(uncompressed_cache_size, root_config.enable_uncompressed_cache_shard_mode);
 
 #if USE_EMBEDDED_COMPILER
     /// Compiled expression cache
@@ -1310,13 +1312,14 @@ int Server::main(const std::vector<std::string> & /*args*/)
     global_context->setChecksumsCache(checksum_cache_settings);
 
     /// A cache for gin index store
-    GinIndexStoreCacheSettings ginindex_store_cache_settings;
-    ginindex_store_cache_settings.lru_max_size = root_config.ginindex_store_cache_size;
-    ginindex_store_cache_settings.mapping_bucket_size = root_config.ginindex_store_cache_bucket;
-    ginindex_store_cache_settings.cache_shard_num = root_config.ginindex_store_cache_shard;
-    ginindex_store_cache_settings.lru_update_interval = root_config.ginindex_store_cache_lru_update_interval;
-    ginindex_store_cache_settings.cache_ttl = root_config.ginindex_store_cache_ttl;
-    global_context->setGinIndexStoreFactory(ginindex_store_cache_settings);
+    GINStoreReaderFactorySettings gin_store_reader_factory_settings;
+    gin_store_reader_factory_settings.lru_max_size = root_config.ginindex_store_cache_size;
+    gin_store_reader_factory_settings.mapping_bucket_size = root_config.ginindex_store_cache_bucket;
+    gin_store_reader_factory_settings.cache_shard_num = root_config.ginindex_store_cache_shard;
+    gin_store_reader_factory_settings.lru_update_interval = root_config.ginindex_store_cache_lru_update_interval;
+    gin_store_reader_factory_settings.cache_ttl = root_config.ginindex_store_cache_ttl;
+    gin_store_reader_factory_settings.sst_block_cache_size = root_config.ginindex_store_cache_sst_block_cache_size;
+    global_context->setGINStoreReaderFactory(gin_store_reader_factory_settings);
 
     size_t compressed_data_index_cache_size = root_config.compressed_data_index_cache;
     global_context->setCompressedDataIndexCache(compressed_data_index_cache_size);
@@ -1455,6 +1458,7 @@ int Server::main(const std::vector<std::string> & /*args*/)
     global_context->setUniqueKeyIndexFileCache(unique_key_index_file_cache_size);
 
     global_context->setNvmCache(config());
+    global_context->initNexusFS(config());
 
     /// Set path for format schema files
     fs::path format_schema_path(config().getString("format_schema_path", fs::path(path) / "format_schemas/"));
@@ -1490,6 +1494,9 @@ int Server::main(const std::vector<std::string> & /*args*/)
     global_context->getReplicatedMergeTreeSettings().sanityCheck(settings);
 
     global_context->setCnchTopologyMaster();
+
+    if (global_context->getServerType() == ServerType::cnch_worker)
+        global_context->setManifestCache();
 
     if (global_context->getServerType() == ServerType::cnch_server)
     {
@@ -1575,7 +1582,6 @@ int Server::main(const std::vector<std::string> & /*args*/)
             /// Load digest information from system.server_part_log for partition selector.
             if (auto server_part_log = global_context->getServerPartLog())
                 server_part_log->prepareTable();
-            global_context->initBGPartitionSelector();
         }
     }
     catch (...)
@@ -2054,6 +2060,9 @@ int Server::main(const std::vector<std::string> & /*args*/)
             auto nvm_cache = global_context->getNvmCache();
             if (nvm_cache)
                 nvm_cache->shutDown();
+            auto nexus_fs = global_context->getNexusFS();
+            if (nexus_fs)
+                nexus_fs->shutDown();
 
             if (current_connections)
                 current_connections = waitServersToFinish(*servers, config().getInt("shutdown_wait_unfinished", 5));

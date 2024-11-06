@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Interpreters/Context.h>
 #include <Optimizer/EqualityInference.h>
 #include <Optimizer/Rewriter/Rewriter.h>
@@ -34,7 +35,7 @@ public:
     String name() const override { return "PredicatePushdown"; }
 
 private:
-    void rewrite(QueryPlan & plan, ContextMutablePtr context) const override;
+    bool rewrite(QueryPlan & plan, ContextMutablePtr context) const override;
     bool isEnabled(ContextMutablePtr context) const override { return context->getSettingsRef().enable_predicate_pushdown_rewrite; }
     const bool pushdown_filter_into_cte;
     const bool simplify_common_filter;
@@ -91,7 +92,7 @@ private:
     CTEInfo & cte_info;
     const std::unordered_map<CTEId, UInt64> & cte_reference_counts;
     std::unordered_map<CTEId, std::vector<std::pair<const CTERefStep *, ConstASTPtr>>> cte_predicates{};
-    Poco::Logger * logger = &Poco::Logger::get("PredicateVisitor");
+    LoggerPtr logger = getLogger("PredicateVisitor");
 
     PlanNodePtr process(PlanNodeBase &, PredicateContext &);
     PlanNodePtr processChild(PlanNodeBase &, PredicateContext &);

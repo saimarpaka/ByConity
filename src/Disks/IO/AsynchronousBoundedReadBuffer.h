@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Common/Logger.h>
 #include <chrono>
 #include <utility>
 #include <IO/AsynchronousReader.h>
@@ -43,7 +44,7 @@ public:
 
     off_t getPosition() override { return file_offset_of_buffer_end - available() + bytes_to_ignore; }
 
-    bool supportsReadAt() override { return true;}
+    bool supportsReadAt() override { return impl->supportsReadAt(); }
 
     size_t readBigAt(char * to, size_t n, size_t range_begin, const std::function<bool(size_t)> & progress_callback) override
     {
@@ -64,7 +65,7 @@ private:
     Memory<> prefetch_buffer;
     std::future<IAsynchronousReader::Result> prefetch_future;
 
-    Poco::Logger * log;
+    LoggerPtr log;
 
     AsyncReadCountersPtr async_read_counters;
 

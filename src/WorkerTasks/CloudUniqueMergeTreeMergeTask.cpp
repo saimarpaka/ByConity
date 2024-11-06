@@ -41,7 +41,7 @@ CloudUniqueMergeTreeMergeTask::CloudUniqueMergeTreeMergeTask(
     : ManipulationTask(std::move(params_), std::move(context_))
     , storage(storage_)
     , log_name(storage.getLogName() + "(MergeTask)")
-    , log(&Poco::Logger::get(log_name))
+    , log(getLogger(log_name))
     , cnch_writer(storage, getContext(), ManipulationType::Merge, getTaskID())
 {
     if (params.source_data_parts.empty())
@@ -202,7 +202,7 @@ void CloudUniqueMergeTreeMergeTask::executeImpl()
             if (UInt64(time(nullptr) - last_touch_time) > getContext()->getSettingsRef().cloud_task_auto_stop_timeout)
             {
                 LOG_TRACE(
-                    &Poco::Logger::get("CloudUniqueMergeTreeMergeTask"),
+                    getLogger("CloudUniqueMergeTreeMergeTask"),
                     "Task {} doesn't receive heartbeat from server, stop it self.",
                     params.task_id);
                 setCancelled();
@@ -348,7 +348,10 @@ void CloudUniqueMergeTreeMergeTask::executeImpl()
         MergeMutateAction::updatePartData(part, commit_time);
         part->relative_path = part->info.getPartNameWithHintMutation();
     }
-    /// TODO: make sure txn is rollbacked and lock is released
+
+    /// lock should be acquired during commitV2
+    if (cnch_lock)
+        cnch_lock->unlock();
 
     LOG_INFO(
         log,
@@ -356,8 +359,10 @@ void CloudUniqueMergeTreeMergeTask::executeImpl()
         params.task_id,
         watch.elapsedMilliseconds(),
         lock_watch.elapsedMilliseconds());
-    /// preload can be done outside the lock todo(jiashuo): support unique merge tree?
-    // preload(context, storage, dumped_data.parts, ManipulationType::Merge);
+
+    /// preload can be done outside the lock
+    if (params.parts_preload_level)
+        cnch_writer.preload(dumped_data.parts);
 }
 
 } // namespace DB

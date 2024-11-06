@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Common/Logger.h>
 #include <chrono>
 #include <optional>
 #include <unordered_set>
@@ -237,7 +238,9 @@ class WorkerGroupStatus
 {
 public:
     friend class WorkerStatusManager;
-    WorkerGroupStatus(Context * context) : global_context(context) { }
+    explicit WorkerGroupStatus(Context * context) : global_context(context)
+    {
+    }
     WorkerGroupStatus() = default;
     ~WorkerGroupStatus();
     void calculateStatus();
@@ -302,9 +305,10 @@ public:
 
     constexpr static const size_t CIRCUIT_BREAKER_THRESHOLD = 20;
 
+    WorkerStatusManager() = default;
     explicit WorkerStatusManager(ContextWeakMutablePtr context_);
 
-    ~WorkerStatusManager();
+    virtual ~WorkerStatusManager();
 
     void updateWorkerNode(const Protos::WorkerNodeResourceData & resource_info, UpdateSource source);
 
@@ -326,6 +330,8 @@ public:
         bool can_check = true);
 
     std::shared_ptr<WorkerGroupStatus> getWorkerGroupStatus(const String & vw_name, const String & wg_name);
+
+    virtual std::optional<WorkerStatusExtra> getWorkerStatus(const WorkerId & worker_id);
 
     void updateConfig(const ASConfiguration & as_config);
 
@@ -360,7 +366,11 @@ public:
         task = pool_.createTask(prefix, [&] { heartbeat(); });
         task->activateAndSchedule();
     }
-    void stop() { task->deactivate(); }
+    void stop()
+    {
+        if (task)
+            task->deactivate();
+    }
     void heartbeat();
     void shutdown();
 
@@ -371,7 +381,7 @@ private:
 
     AdaptiveSchedulerConfig adaptive_scheduler_config;
     mutable bthread::Mutex map_mutex;
-    Poco::Logger * log;
+    LoggerPtr log;
     // rm heartbeat
     mutable std::optional<BackgroundSchedulePool> schedule_pool;
     std::atomic<UInt64> heartbeat_interval{10000}; /// in ms;

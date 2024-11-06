@@ -42,11 +42,10 @@
 #include <Optimizer/Rule/Rewrite/RemoveRedundantRules.h>
 #include <Optimizer/Rule/Rewrite/SimplifyExpressionRules.h>
 #include <Optimizer/Rule/Rewrite/SingleDistinctAggregationToGroupBy.h>
+#include <Optimizer/Rule/Rewrite/SumIfToCountIf.h>
 #include <Optimizer/Rule/Rewrite/SwapAdjacentRules.h>
 #include <Optimizer/Rule/Rewrite/TopNRules.h>
-#include <Optimizer/Rule/Rewrite/EagerAggregation.h>
-#include <Optimizer/Rule/Rewrite/CrossJoinToUnion.h>
-#include <Optimizer/Rule/Rewrite/SumIfToCountIf.h>
+#include <Optimizer/Rule/Rewrite/JoinUsingToJoinOn.h>
 
 namespace DB
 {
@@ -125,7 +124,7 @@ std::vector<RulePtr> Rules::removeRedundantRules()
         // std::make_shared<RemoveRedundantOuterJoin>()
         std::make_shared<RemoveRedundantTwoApply>(),
         std::make_shared<RemoveRedundantAggregateWithReadNothing>(),
-        };
+    };
 }
 
 std::vector<RulePtr> Rules::pushAggRules()
@@ -144,6 +143,7 @@ std::vector<RulePtr> Rules::pushDownLimitRules()
         std::make_shared<PushLimitThroughUnion>(),
         std::make_shared<PushdownLimitIntoWindow>(),
         std::make_shared<PushTopNThroughProjection>(),
+        std::make_shared<PushSortThroughProjection>(),
         std::make_shared<PushLimitIntoSorting>()};
 }
 
@@ -202,12 +202,16 @@ std::vector<RulePtr> Rules::explainAnalyzeRules()
 
 std::vector<RulePtr> Rules::pushDownTopNRules()
 {
-    return {std::make_shared<PushTopNThroughProjection>()};
+    return {std::make_shared<PushTopNThroughProjection>(), std::make_shared<PushSortThroughProjection>()};
 }
 
 std::vector<RulePtr> Rules::createTopNFilteringRules()
 {
-    return {std::make_shared<CreateTopNFilteringForAggregating>()};
+    return {
+        std::make_shared<CreateTopNFilteringForAggregating>(),
+        std::make_shared<CreateTopNFilteringForDistinct>(),
+        std::make_shared<CreateTopNFilteringForAggregatingLimit>(),
+        std::make_shared<CreateTopNFilteringForDistinctLimit>()};
 }
 
 std::vector<RulePtr> Rules::pushDownTopNFilteringRules()
@@ -243,13 +247,27 @@ std::vector<RulePtr> Rules::extractBitmapImplicitFilterRules()
 
 std::vector<RulePtr> Rules::pushUnionThroughJoin()
 {
-    return {
-        std::make_shared<PushUnionThroughJoin>(), std::make_shared<PushUnionThroughProjection>()};
+    return {std::make_shared<PushUnionThroughJoin>(), std::make_shared<PushUnionThroughProjection>()};
 }
 
 std::vector<RulePtr> Rules::addRepartitionColumn()
 {
     return {std::make_shared<AddRepartitionColumn>()};
+}
+
+std::vector<RulePtr> Rules::joinUsingToJoinOn()
+{
+    return {std::make_shared<JoinUsingToJoinOn>()};
+}
+
+std::vector<RulePtr> Rules::markTopNDistinct()
+{
+    return {std::make_shared<MarkTopNDistinctThroughExchange>()};
+}
+
+std::vector<RulePtr> Rules::pushTopNDistinct()
+{
+    return {std::make_shared<PushPartialTopNDistinctThroughExchange>()};
 }
 
 }

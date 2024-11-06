@@ -58,7 +58,7 @@ namespace
     class FindDirectRightVisitor : public PlanNodeVisitor<void, const JoinPath>
     {
     public:
-        explicit FindDirectRightVisitor(CTEInfo & cte_info_, Poco::Logger * logger_) : cte_info(cte_info_), logger(logger_)
+        explicit FindDirectRightVisitor(CTEInfo & cte_info_, LoggerPtr logger_) : cte_info(cte_info_), logger(logger_)
         {
         }
 
@@ -67,7 +67,7 @@ namespace
         void visitJoinNode(JoinNode & node, const JoinPath &) override;
 
         CTEInfo & cte_info;
-        Poco::Logger * logger;
+        LoggerPtr logger;
         std::unordered_set<PlanNodeId> deadlock_ctes;
         VisitPath visit_path;
     };
@@ -110,7 +110,7 @@ namespace
     {
     public:
         AddBufferVisitor(
-            const std::unordered_set<PlanNodeId> & deadlock_ctes_, ContextMutablePtr context_, CTEInfo & cte_info_, Poco::Logger * logger_)
+            const std::unordered_set<PlanNodeId> & deadlock_ctes_, ContextMutablePtr context_, CTEInfo & cte_info_, LoggerPtr logger_)
             : SimplePlanRewriter<const Void>(std::move(context_), cte_info_), deadlock_ctes(deadlock_ctes_), logger(logger_)
         {
         }
@@ -118,7 +118,7 @@ namespace
         PlanNodePtr visitCTERefNode(CTERefNode & node, const Void & c) override;
 
         const std::unordered_set<PlanNodeId> & deadlock_ctes;
-        Poco::Logger * logger;
+        LoggerPtr logger;
     };
 
     void FindDirectRightVisitor::visitPlanNode(PlanNodeBase & node, const JoinPath & join_path)
@@ -334,7 +334,7 @@ namespace
                     deadlock_ctes.emplace(node_id);
             }
 
-            left_ctes.insert(right_ctes.begin(), left_ctes.end());
+            left_ctes.insert(right_ctes.begin(), right_ctes.end());
             return left_ctes;
         }
 
@@ -345,12 +345,12 @@ namespace
     };
 }
 
-void AddBufferForDeadlockCTE::rewrite(QueryPlan & plan, ContextMutablePtr context) const
+bool AddBufferForDeadlockCTE::rewrite(QueryPlan & plan, ContextMutablePtr context) const
 {
-    static auto * logger = &Poco::Logger::get("AddBufferForDeadlockCTE");
+    static auto logger = getLogger("AddBufferForDeadlockCTE");
 
     if (plan.getCTEInfo().empty())
-        return;
+        return false;
 
     std::unordered_set<PlanNodeId> deadlock_ctes;
 
@@ -370,7 +370,7 @@ void AddBufferForDeadlockCTE::rewrite(QueryPlan & plan, ContextMutablePtr contex
     }
 
     if (deadlock_ctes.empty())
-        return;
+        return false;
 
     if (logger->debug())
     {
@@ -403,6 +403,7 @@ void AddBufferForDeadlockCTE::rewrite(QueryPlan & plan, ContextMutablePtr contex
         for (auto & rewriter : rewriters)
             rewriter->rewritePlan(plan, context);
     }
+    return true;
 }
 
 }

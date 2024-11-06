@@ -207,7 +207,7 @@ String InterpreterShowTablesQuery::getRewrittenQueryImpl()
         rewritten_query << "is_temporary";
     }
     else
-        rewritten_query << "database = " << DB::quote << ((query.dictionaries || query.snapshots) ? database : getOriginalDatabaseName(database));
+        rewritten_query << "database = " << DB::quote << ((query.snapshots) ? database : getOriginalDatabaseName(database));
 
     if (!query.like.empty())
         rewritten_query << " AND name " << (query.not_like ? "NOT " : "") << (query.case_insensitive_like ? "ILIKE " : "LIKE ") << DB::quote
@@ -287,7 +287,7 @@ static String rewriteShowCatalogForExternal(const ASTShowTablesQuery & query, co
 
     if (query.limit_length)
         rewritten_query << " LIMIT " << query.limit_length;
-    LOG_TRACE(&Poco::Logger::get("getRewrittenQueryForExternalCatalogImpl"), rewritten_query.str());
+    LOG_TRACE(getLogger("getRewrittenQueryForExternalCatalogImpl"), rewritten_query.str());
 
     return rewritten_query.str();
 }

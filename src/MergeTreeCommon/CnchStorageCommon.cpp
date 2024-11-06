@@ -16,24 +16,27 @@
 #include <memory>
 #include <MergeTreeCommon/CnchStorageCommon.h>
 
-#include <Core/UUID.h>
 #include <Columns/ColumnSet.h>
+#include <Core/Protocol.h>
+#include <Core/UUID.h>
 #include <DataStreams/RemoteBlockInputStream.h>
-#include <DataTypes/FieldToDataType.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <DataTypes/FieldToDataType.h>
 #include <Functions/FunctionFactory.h>
-#include <Interpreters/TranslateQualifiedNamesVisitor.h>
-#include <Interpreters/getTableExpressions.h>
-#include <Interpreters/convertFieldToType.h>
 #include <IO/ConnectionTimeoutsContext.h>
-#include <Parsers/ASTSetQuery.h>
-#include <Parsers/ASTLiteral.h>
+#include <Interpreters/TranslateQualifiedNamesVisitor.h>
+#include <Interpreters/convertFieldToType.h>
+#include <Interpreters/getTableExpressions.h>
 #include <Parsers/ASTCreateQuery.h>
-#include <Parsers/parseQuery.h>
+#include <Parsers/ASTLiteral.h>
+#include <Parsers/ASTSetQuery.h>
 #include <Parsers/ParserCreateQuery.h>
 #include <Parsers/formatAST.h>
+#include <Parsers/parseQuery.h>
+#include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/split.hpp>
 #include <Common/StringUtils/StringUtils.h>
-#include <Core/Protocol.h>
+#include "Transaction/TxnTimestamp.h"
 
 namespace DB
 {
@@ -96,7 +99,7 @@ bool CnchStorageCommonHelper::healthCheckForWorkerGroup(ContextPtr context, Work
             catch (const NetException &)
             {
                 remove_marks[i] = 1;
-                LOG_INFO(&Poco::Logger::get("CnchStorageCommonHelper"), "Unhealthy worker {} is skipped.",
+                LOG_INFO(getLogger("CnchStorageCommonHelper"), "Unhealthy worker {} is skipped.",
                                             (worker_group->getHostWithPortsVec()[i]).id);
             }
         });
@@ -116,6 +119,18 @@ String CnchStorageCommonHelper::getCloudTableName(ContextPtr context) const
 {
     auto txn_id = context->getCurrentTransactionID();
     return table_id.table_name + '_' + txn_id.toString();
+}
+
+String CnchStorageCommonHelper::getOriginalTableName(const String & local_table_name, DB::TxnTimestamp txn_id)
+{
+    auto txn_id_str = "_" + txn_id.toString();
+    auto found = local_table_name.find(txn_id_str);
+    if (found)
+    {
+        return local_table_name.substr(0, found)
+            + local_table_name.substr(std::min(found + txn_id_str.length(), local_table_name.length()));
+    }
+    return local_table_name;
 }
 
 /// select query has database, table and table function names as AST pointers
@@ -335,7 +350,7 @@ String CnchStorageCommonHelper::getCreateQueryForCloudTable(
     formatAST(create_query, statement_buf, false);
     writeChar('\n', statement_buf);
     LOG_TRACE(
-        &Poco::Logger::get("getCreateQueryForCloudTable"), "create query for cloud table is {}", statement_buf.str());
+        getLogger("getCreateQueryForCloudTable"), "create query for cloud table is {}", statement_buf.str());
     return statement_buf.str();
 }
 
@@ -373,7 +388,7 @@ bool CnchStorageCommonHelper::forwardQueryToServerIfNeeded(ContextPtr query_cont
         query = query_status.query;
     }
     LOG_DEBUG(
-        &Poco::Logger::get("CnchStorageCommonHelper"), "Send query `{}` to server {}", query, host_port.toDebugString());
+        getLogger("CnchStorageCommonHelper"), "Send query `{}` to server {}", query, host_port.toDebugString());
     RemoteBlockInputStream stream(connection, query, {}, query_context);
     NullBlockOutputStream output({});
 

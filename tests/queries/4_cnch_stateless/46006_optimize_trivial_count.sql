@@ -1,4 +1,3 @@
-use test;
 drop table if exists test46006;
 set optimize_trivial_count_query = 1;
 set enable_optimizer = 1;
@@ -89,5 +88,26 @@ FROM
     FROM test46006
     WHERE x = 'xx'
 );
+
+explain stats=0, verbose=0 
+SELECT count(*)
+FROM test46006
+WHERE j <= 1
+UNION ALL
+SELECT count(*)
+FROM test46006;
+
+SELECT count(*)
+FROM test46006
+WHERE j <= 1
+UNION ALL
+SELECT count(*)
+FROM test46006;
+
+drop table if exists test46006_1;
+create table test46006_1(i int) ENGINE = CnchMergeTree() partition by i order by i;
+insert into test46006_1 select count() from test46006;
+insert into test46006_1 select count() from test46006 where i<10;
+drop table if exists test46006_1;
 
 drop table if exists test46006;

@@ -133,6 +133,7 @@ public:
 
     void invalidCacheWithNewTopology(const CnchServerTopology & topology);
 
+    std::pair<Int64, Int64> getTotalAndMaxPartsNumber(const IStorage & storage);
 
     /**
      * @brief Evict all parts specified.
@@ -158,6 +159,12 @@ public:
         const pb::RepeatedPtrField<Protos::DataModelPart> & parts_model,
         bool is_merged_parts,
         bool should_update_metrics,
+        const PairInt64 & topology_version);
+
+    /// Only for create corresponding partition info
+    void insertStagedPartsIntoCache(
+        const IStorage & table,
+        const pb::RepeatedPtrField<Protos::DataModelPart> & parts_model,
         const PairInt64 & topology_version);
 
     void insertDeleteBitmapsIntoCache(
@@ -200,9 +207,9 @@ public:
 
     bool checkIfCacheValidWithNHUT(const UUID & uuid, const UInt64 & nhut);
 
-    StoragePtr getStorageFromCache(const UUID & uuid, const PairInt64 & topology_version);
+    StoragePtr getStorageFromCache(const UUID & uuid, const PairInt64 & topology_version, const Context & query_context);
 
-    void insertStorageCache(const StorageID & storage_id, StoragePtr storage, UInt64 commit_ts, const PairInt64 & topology_version);
+    void insertStorageCache(const StorageID & storage_id, StoragePtr storage, UInt64 commit_ts, const PairInt64 & topology_version, const Context & query_context);
 
     void removeStorageCache(const String & database, const String & table = "");
 
@@ -232,7 +239,7 @@ private:
 
     /// We manage the table meta locks here to make sure each table has only one meta lock no matter how many different table meta entry it has.
     /// The lock is cleaned by a background task if it is no longer be used by any table meta entry.
-    std::unordered_map<UUID, RWLock> meta_lock_container;
+    std::unordered_map<UUID, std::shared_ptr<MetaLockHolder>> meta_lock_container;
 
     BackgroundSchedulePool::TaskHolder active_table_loader; // Used to load table when server start up, only execute once;
     BackgroundSchedulePool::TaskHolder meta_lock_cleaner; // remove unused meta lock periodically;
@@ -315,7 +322,7 @@ private:
     template <typename Adapter, typename... Args>
     void invalidDataCache(const UUID & uuid, const Strings & data_names, Args... args);
 
-    template <typename Adapter, typename InputValueVec, typename ValueVec, typename CachePtr, typename CacheValueMap, typename GetKeyFunc>
+    template <typename Adapter, typename InputValueVec, typename ValueVec, typename CachePtr, typename CacheValueMap, typename GetKeyFunc, bool insert_into_cache = true>
     void insertDataIntoCache(
         const IStorage & table,
         const InputValueVec & parts_model,

@@ -52,6 +52,7 @@
 #include <QueryPlan/WindowStep.h>
 #include <boost/algorithm/string/replace.hpp>
 #include <fmt/format.h>
+#include <magic_enum.hpp>
 #include <Common/FieldVisitorToString.h>
 #include <Common/HashTable/Hash.h>
 
@@ -1477,6 +1478,13 @@ String StepPrinter::printJoinStep(const JoinStep & step)
         details << "isOrdered:" << step.isOrdered() << "|";
     }
 
+    if (step.isHasUsing())
+    {
+        auto require_right_keys = step.getRequireRightKeys();
+        auto using_str = require_right_keys ? fmt::format("{}", fmt::join(*require_right_keys, ",")) : "nullopt";
+        details << "hasUsing:" << using_str << "|";
+    }
+
     if (!step.getRuntimeFilterBuilders().empty())
     {
         details << "Runtime Filters \\n";
@@ -2081,9 +2089,9 @@ String StepPrinter::printTableScanStep(const TableScanStep & step)
 
 String StepPrinter::printReadStorageRowCountStep(const ReadStorageRowCountStep & step)
 {
-    auto database_and_table = step.getDatabaseAndTableName();
+    auto storage_id = step.getStorageID();
     std::stringstream details;
-    details << database_and_table.first << "." << database_and_table.second << "|";
+    details << storage_id.getFullTableName() << "|";
 
     auto ast = step.getQuery();
     auto * query = ast->as<ASTSelectQuery>();
@@ -2343,6 +2351,16 @@ String StepPrinter::printDistinctStep(const DistinctStep & step)
     details << "limit:\\n";
     details << step.getLimitHint();
     details << "|";
+    if (step.preDistinct())
+    {
+        details << "pre";
+        details << "|";
+    }
+    if (!step.canToAgg())
+    {
+        details << "can not to agg";
+        details << "|";
+    }
     details << "Output |";
     for (const auto & column : step.getOutputStream().header)
     {
@@ -3321,7 +3339,7 @@ void GraphvizPrinter::printChunk(String transform, const Block & block, const Ch
         value << "\n";
     }
 
-    LOG_DEBUG(&Poco::Logger::get("GraphvizPrinter"), value.str());
+    LOG_DEBUG(getLogger("GraphvizPrinter"), value.str());
 }
 
 void appendAST(
@@ -3919,6 +3937,7 @@ String GraphvizPrinter::printGroup(const Group & group, const std::unordered_map
     auto property_str = [&](const Property & property) {
         std::stringstream ss;
         ss << property.getNodePartitioning().toString();
+        ss << "  Component:" << magic_enum::enum_name(property.getNodePartitioning().getComponent()) << "; ";
         ss << " ";
         ss << property.getCTEDescriptions().toString();
         return ss.str();

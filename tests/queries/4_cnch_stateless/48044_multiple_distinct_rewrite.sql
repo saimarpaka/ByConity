@@ -626,4 +626,47 @@ SELECT
     sumIf(gmv, platform = 1) AS douyin_index,
     sumIf(gmv, platform IN (2, 4)) AS outer_index
 FROM ads_agroup_24year_brand_stat_df
-WHERE (p_date = '2024-06-06') AND (date_type = 'month') AND ((platform IN (2, 4)) OR (platform = 1)) AND (date_time IN ('20221130', '20221231', '20230131', '20230228', '20230331', '20230430')) AND (brand_layer IN ('0份额品牌', '极劣势品牌', '劣势品牌', '胶着品牌', '优势品牌')) AND (shop_settle_type IN ('旗舰店', '经销商')) AND (strategy_first_vbline_id = 11230509000002) AND isNotNull(strategy_second_vbline_id) AND isNotNull(strategy_agroup_industry_name)
+WHERE (p_date = '2024-06-06') AND (date_type = 'month') AND ((platform IN (2, 4)) OR (platform = 1)) AND (date_time IN ('20221130', '20221231', '20230131', '20230228', '20230331', '20230430')) AND (brand_layer IN ('0份额品牌', '极劣势品牌', '劣势品牌', '胶着品牌', '优势品牌')) AND (shop_settle_type IN ('旗舰店', '经销商')) AND (strategy_first_vbline_id = 11230509000002) AND isNotNull(strategy_second_vbline_id) AND isNotNull(strategy_agroup_industry_name);
+
+CREATE TABLE test_48044.aeolus_data_table_8_1718608_prod
+(
+    `row_id_kmtq3k` Int64,
+    `p_date` Date,
+    `first_normal_business_time` Nullable(Int64),
+    `shop_id` Nullable(Int64),
+    `product_num` Nullable(String)
+)
+ENGINE = CnchMergeTree()
+PARTITION BY p_date
+ORDER BY (row_id_kmtq3k, intHash64(row_id_kmtq3k));
+
+SELECT
+    countDistinct(if(first_normal_business_time > 0, shop_id, NULL)) AS _1700039769535,
+    quantile(0.5)(CAST(product_num, 'Nullable(Float64)')) AS _quantile05_1700038790744
+FROM test_48044.aeolus_data_table_8_1718608_prod
+GROUP BY first_normal_business_time;
+
+drop table if exists test_48044.t_order_mx_all;
+CREATE TABLE test_48044.t_order_mx_all
+(
+    `city` String COMMENT '城市',
+    `version_time` DateTime DEFAULT now() COMMENT '版本时间',
+    `loginname` String COMMENT '玩家名称',
+    `product_id` String COMMENT '产品号',
+    `reckontime` DateTime COMMENT '结算时间',
+    `billtime` DateTime COMMENT '投注时间',
+    `billno` String COMMENT '订单编号',
+    `platform_id` String DEFAULT 97 COMMENT '游戏厅id'
+)
+ENGINE = CnchMergeTree
+PARTITION BY toYYYYMMDD(reckontime)
+CLUSTER BY sipHash64(billno, platform_id) INTO 20 BUCKETS
+PRIMARY KEY (billno, platform_id)
+ORDER BY (billno, platform_id);
+
+SELECT
+        `count`(DISTINCT `loginname`) AS `totalheadcount`,
+        `argMax`(`city`, `version_time`) AS `city`
+FROM `test_48044`.`t_order_mx_all`
+GROUP BY
+        `product_id`;

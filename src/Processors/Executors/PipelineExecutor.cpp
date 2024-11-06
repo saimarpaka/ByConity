@@ -81,7 +81,8 @@ PipelineExecutor::PipelineExecutor(Processors & processors_, QueryStatus * elem,
     if (process_list_element)
     {
         report_processors_profile = process_list_element->getContext()->getSettingsRef().report_processors_profiles;
-        need_processors_profiles = process_list_element->getContext()->getSettingsRef().log_processors_profiles || report_processors_profile;
+        need_processors_profiles = process_list_element->getContext()->getSettingsRef().report_segment_profiles ||
+            process_list_element->getContext()->getSettingsRef().log_processors_profiles || report_processors_profile;
     }
 
     try
@@ -169,7 +170,7 @@ void PipelineExecutor::addJob(ExecutingGraph::Node * execution_state)
                     PlanSegmentExecutionInfo info{
                         .execution_address
                         = AddressInfo(getHostIPFromEnv(), query_context->getTCPPort(), "", "", query_context->getExchangePort())};
-                    auto result = convertFailurePlanSegmentStatusToResult(query_context, info, exception_code, exception_message);
+                    auto result = convertFailurePlanSegmentStatusToResult(std::move(query_context), info, exception_code, exception_message);
                     reportExecutionResult(result);
                 }
             }
@@ -518,7 +519,7 @@ void collectProfileMetricRequest(
 }
 
 void reportToCoordinator(
-    Poco::Logger * log,
+    LoggerPtr log,
     const AddressInfo & coordinator_address,
     const AddressInfo & current_address,
     const IProcessor * processor,
@@ -546,7 +547,7 @@ void reportToCoordinator(
 }
 
 void reportToCoordinator(
-    Poco::Logger * log,
+    LoggerPtr log,
     const AddressInfo & coordinator_address,
     const AddressInfo & current_address,
     const Processors & processors,
@@ -614,17 +615,23 @@ void PipelineExecutor::setReadProgressCallback(ReadProgressCallbackPtr callback)
     read_progress_callback = std::move(callback);
 }
 
-void PipelineExecutor::cancel()
+void PipelineExecutor::cancel(bool has_exception)
 {
     cancelled = true;
     finish();
-
     std::lock_guard guard(processors_mutex);
 
     if (report_processors_profile)
         reportProcessorProfileOnCancel(processors);
     for (auto & processor : processors)
         processor->cancel();
+
+    /// Parts of executors throw exceptions need kill whole query
+    if (has_exception && process_list_element)
+    {
+        LOG_WARNING(log, "The query is throwing exceptions, just set killed");
+        process_list_element->setKilled();
+    }
 }
 
 void PipelineExecutor::finish()
@@ -888,7 +895,7 @@ void PipelineExecutor::executeStepImpl(size_t thread_num, size_t num_threads, st
             }
 
             if (node->exception)
-                cancel();
+                cancel(true);
 
             if (finished)
                 break;

@@ -1,4 +1,5 @@
 #pragma once
+#include <Common/Logger.h>
 #include "Common/config.h"
 #if USE_HIVE and USE_JAVA_EXTENSIONS
 
@@ -28,9 +29,6 @@ public:
         ContextPtr & local_context,
         unsigned num_streams) override;
 
-    bool supportsOptimizer() const override { return true; }
-    bool supportsDistributedRead() const override { return true; }
-    StorageID prepareTableRead(const Names & output_columns, SelectQueryInfo & query_info, ContextPtr local_context) override;
     std::optional<TableStatistics> getTableStats(const Strings & columns, ContextPtr local_context) override;
 
     void serializeHiveFiles(Protos::ProtoHiveFiles & proto, const HiveFiles & hive_files) override;
@@ -40,7 +38,7 @@ private:
     Strings getHiveColumnTypes() const;
 
     JNIHiveMetastoreClient * jni_meta_client = nullptr;
-    Poco::Logger * log {&Poco::Logger::get("CnchLas")};
+    LoggerPtr log {getLogger("CnchLas")};
 };
 
 }

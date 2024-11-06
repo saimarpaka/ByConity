@@ -4,6 +4,7 @@
 #include <Optimizer/ExpressionDeterminism.h>
 #include <Optimizer/ProjectionPlanner.h>
 #include <Optimizer/SymbolTransformMap.h>
+#include <Optimizer/Utils.h>
 #include <Parsers/ASTTableColumnReference.h>
 #include <Parsers/ASTVisitor.h>
 #include <Parsers/formatAST.h>
@@ -55,6 +56,12 @@ namespace
         {
             const auto & filter = dynamic_cast<FilterStep &>(*node->getStep());
             return !ExpressionDeterminism::canChangeOutputRows(filter.getFilter(), context);
+        }
+
+        if (type == IQueryPlanStep::Type::TableScan)
+        {
+            const auto & table_scan = dynamic_cast<TableScanStep &>(*node->getStep());
+            return !!dynamic_cast<StorageCnchMergeTree *>(table_scan.getStorage().get());
         }
 
         const static std::unordered_set<IQueryPlanStep::Type> sharable_steps{
@@ -501,7 +508,7 @@ namespace
 PlanNodePtr ShareCommonExpression::rewriteImpl(PlanNodePtr root, ContextMutablePtr context)
 {
     assert(root != nullptr);
-    Poco::Logger * logger = &Poco::Logger::get("ShareCommonExpression");
+    LoggerPtr logger = getLogger("ShareCommonExpression");
     std::vector<DFSNode> stack;
     stack.emplace_back(root.get());
 
@@ -616,7 +623,7 @@ PlanNodePtr ShareCommonExpression::rewriteImpl(PlanNodePtr root, ContextMutableP
     return root;
 }
 
-void ShareCommonExpression::rewrite(QueryPlan & plan, ContextMutablePtr context) const
+bool ShareCommonExpression::rewrite(QueryPlan & plan, ContextMutablePtr context) const
 {
     auto & cte_info = plan.getCTEInfo();
 
@@ -624,5 +631,6 @@ void ShareCommonExpression::rewrite(QueryPlan & plan, ContextMutablePtr context)
         cte_info.update(cte.first, rewriteImpl(cte.second, context));
 
     plan.update(rewriteImpl(plan.getPlanNode(), context));
+    return true;
 }
 }

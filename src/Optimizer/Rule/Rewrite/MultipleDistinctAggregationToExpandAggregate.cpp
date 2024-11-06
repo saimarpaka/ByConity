@@ -122,6 +122,8 @@ bool MultipleDistinctAggregationToExpandAggregate::hasNoUnSupportedFunc(const Ag
     {
         if (un_supported_func.contains(Poco::toLower(agg_desc.function->getName())))
             return false;
+        if (!distinct_func.contains(Poco::toLower(agg_desc.function->getName())) && agg_desc.arguments.size() > 1)
+            return false;
     }
     return true;
 }
@@ -410,10 +412,11 @@ AggregateDescription MultipleDistinctAggregationToExpandAggregate::distinctAggWi
 AggregateDescription
 MultipleDistinctAggregationToExpandAggregate::nonDistinctAggWithMask(const AggregateDescription & agg_desc, String & mask_column)
 {
-    DataTypes data_types = agg_desc.function->getArgumentTypes();
+    DataTypes data_types;
+    data_types.emplace_back(agg_desc.function->getReturnType());
     data_types.emplace_back(std::make_shared<DataTypeUInt8>());
 
-    Array parameters = agg_desc.function->getParameters();
+    Array parameters;
     AggregateFunctionProperties properties;
 
     String fun = "anyIf";
@@ -434,11 +437,9 @@ MultipleDistinctAggregationToExpandAggregate::nonDistinctAggWithMask(const Aggre
 
     agg_with_mask.mask_column = mask_column;
     agg_with_mask.function = new_agg_fun;
-    agg_with_mask.parameters = agg_desc.parameters;
+    agg_with_mask.parameters = parameters;
     agg_with_mask.column_name = agg_desc.column_name;
     agg_with_mask.argument_names = argument_names;
-    agg_with_mask.parameters = agg_desc.parameters;
-    agg_with_mask.arguments = agg_desc.arguments;
 
     return agg_with_mask;
 }

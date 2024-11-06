@@ -493,6 +493,15 @@
     M(CnchSendResourceElapsedMilliseconds, "Total time for send resource to all workers") \
     M(CnchDiskCacheNodeUnLocalityParts, "Total count of un-locality disk cache part") \
     \
+    M(ServerRpcRequest, "Total number of RPC requests to server") \
+    M(ServerRpcElaspsedMicroseconds, "Total time of RPC requests to server, not contain async call join time") \
+    M(WorkerRpcRequest, "Total number of RPC requests to worker") \
+    M(WorkerRpcElaspsedMicroseconds, "Total time of RPC requests to worker, not contain async call join time") \
+    M(CatalogRequest, "Total number of requests in Catalog") \
+    M(CatalogElapsedMicroseconds, "Total time of requests in Catalog") \
+    M(KvRpcRequest, "Total number of requests to KV") \
+    M(KvRpcElapsedMicroseconds, "Total time of requests to KV, not contain SCAN fetch time") \
+    \
     M(IntentLockElapsedMilliseconds, "Total time spent to acquire intent locks") \
     M(IntentLockWriteIntentElapsedMilliseconds, "Total time spent to write intents") \
     M(IntentLockPreemptionElapsedMilliseconds, "Total time spent to preempt conflict locks") \
@@ -560,6 +569,16 @@
     M(TryGetSnapshotFailed, "") \
     M(GetAllSnapshotsSuccess, "") \
     M(GetAllSnapshotsFailed, "") \
+    M(CreateBackupJobSuccess, "") \
+    M(CreateBackupJobFailed, "") \
+    M(UpdateBackupJobSuccess, "") \
+    M(UpdateBackupJobFailed, "") \
+    M(GetBackupJobSuccess, "") \
+    M(GetBackupJobFailed, "") \
+    M(GetAllBackupJobSuccess, "") \
+    M(GetAllBackupJobFailed, "") \
+    M(RemoveBackupJobSuccess, "") \
+    M(RemoveBackupJobFailed, "") \
     M(CreateTableSuccess, "") \
     M(CreateTableFailed, "") \
     M(DropTableSuccess, "") \
@@ -710,6 +729,10 @@
     M(GetAllUndoBufferFailed, "") \
     M(GetUndoBufferIteratorSuccess, "") \
     M(GetUndoBufferIteratorFailed, "") \
+    M(GetUndoBuffersWithKeysSuccess, "") \
+    M(GetUndoBuffersWithKeysFailed, "") \
+    M(ClearUndoBuffersByKeysSuccess, "") \
+    M(ClearUndoBuffersByKeysFailed, "") \
     M(GetTransactionRecordsSuccess, "") \
     M(GetTransactionRecordsFailed, "") \
     M(GetTransactionRecordsTxnIdsSuccess, "") \
@@ -1091,6 +1114,56 @@
     M(RegionManagerNumInMemBufCleanupRetries, "RegionManager number of in-memory buffer cleanup retries") \
     M(RegionManagerCleanRegionRetries, "RegionManager number of clean region retries") \
 \
+    M(NexusFSHit, "NexusFS hits") \
+    M(NexusFSHitInflightInsert, "NexusFS hits on in-flight inserts") \
+    M(NexusFSMiss, "NexusFS missed") \
+    M(NexusFSPreload, "NexusFS preloads") \
+    M(NexusFSDeepRetry, "NexusFS deep retries") \
+    M(NexusFSDiskCacheEvict, "NexusFS disk cache evicts") \
+    M(NexusFSDiskCacheInsertRetries, "NexusFS disk cache retries when insert") \
+    M(NexusFSDiskCacheError, "NexusFS disk cache errors") \
+    M(NexusFSDiskCacheBytesRead, "NexusFS disk cache bytes read") \
+    M(NexusFSDiskCacheBytesWrite, "NexusFS disk cache bytes write") \
+    M(NexusFSReadFromInsertCxt, "NexusFS ReadFromInsertCxt successes") \
+    M(NexusFSReadFromInsertCxtRetry, "NexusFS ReadFromInsertCxt retries") \
+    M(NexusFSReadFromInsertCxtDeepRetry, "NexusFS ReadFromInsertCxt deep retries") \
+    M(NexusFSReadFromInsertCxtBytesRead, "NexusFS ReadFromInsertCxt bytes read") \
+    M(NexusFSReadFromInsertCxtNonCopy, "NexusFS ReadFromInsertCxt by non-copying method successes") \
+    M(NexusFSReadFromInsertCxtNonCopyBytesRead, "NexusFS ReadFromInsertCxt by non-copying method bytes read") \
+    M(NexusFSReadFromDisk, "NexusFS ReadFromDisk successes") \
+    M(NexusFSReadFromDiskRetry, "NexusFS ReadFromDisk retries") \
+    M(NexusFSReadFromDiskDeepRetry, "NexusFS ReadFromDisk deep retries") \
+    M(NexusFSReadFromDiskBytesRead, "NexusFS ReadFromDisk bytes read") \
+    M(NexusFSReadFromBuffer, "NexusFS ReadFromBuffer successes") \
+    M(NexusFSReadFromBufferRetry, "NexusFS ReadFromBuffer retries") \
+    M(NexusFSReadFromBufferDeepRetry, "NexusFS ReadFromBuffer deep retries") \
+    M(NexusFSReadFromBufferBytesRead, "NexusFS ReadFromBuffer bytes read") \
+    M(NexusFSReadFromBufferNonCopy, "NexusFS ReadFromBuffer by non-copying method successes") \
+    M(NexusFSReadFromBufferNonCopyBytesRead, "NexusFS ReadFromBuffer by non-copying method bytes read") \
+    M(NexusFSReadFromSourceBytesRead, "NexusFS bytes read from source") \
+    M(NexusFSReadFromSourceMicroseconds, "NexusFS read from source microseconds") \
+    M(NexusFSTimeout, "NexusFS read timeouts") \
+    M(NexusFSPrefetchToBuffer, "NexusFS PrefetchToBuffer successes") \
+    M(NexusFSPrefetchToBufferBytesRead, "NexusFS PrefetchToBuffer bytes read") \
+    M(NexusFSBufferHit, "NexusFS buffer hits") \
+    M(NexusFSBufferMiss, "NexusFS buffer misses") \
+    M(NexusFSBufferPreload, "NexusFS buffer preloads") \
+    M(NexusFSBufferPreloadRetry, "NexusFS buffer retries in preload") \
+    M(NexusFSBufferEmptyCoolingQueue, "NexusFS buffer cooling queue empty") \
+    M(NexusFSInodeManagerLookupMicroseconds, "NexusFS InodeManager lookup microseconds") \
+    M(NexusFSInodeManagerInsertMicroseconds, "NexusFS InodeManager insert microseconds") \
+\
+    M(ReadFromNexusFSReadBytes, "Read bytes from nuxusfs.") \
+    M(ReadFromNexusFSSeeks, "Total number of seeks for async buffer") \
+    M(ReadFromNexusFSPrefetchRequests, "Number of prefetches made with asynchronous reading from nuxusfs") \
+    M(ReadFromNexusFSUnusedPrefetches, "Number of prefetches pending at buffer destruction") \
+    M(ReadFromNexusFSPrefetchedReads, "Number of reads from prefetched buffer") \
+    M(ReadFromNexusFSPrefetchTaskWait, "Number of waiting when reading from prefetched buffer") \
+    M(ReadFromNexusFSPrefetchTaskNotWait, "Number of not waiting when reading from prefetched buffer") \
+    M(ReadFromNexusFSPrefetchedBytes, "Number of bytes from prefetched buffer") \
+    M(ReadFromNexusFSAsynchronousWaitMicroseconds, "Time spent in waiting for asynchronous nuxusfs reads.") \
+    M(ReadFromNexusFSSynchronousWaitMicroseconds, "Time spent in waiting for synchronous nuxusfs reads.") \
+\
     M(TSORequest, "Number requests sent to TSO") \
     M(TSORequestMicroseconds, "Total time spent in get timestamp from TSO") \
     M(TSOError, "Error logged by TSO Service as a response to CNCH") \
@@ -1145,14 +1218,20 @@
 \
     M(LoadedServerParts, "Total server parts loaded from storage manager by version") \
     M(LoadServerPartsMilliseconds, "The time spend on loading server parts by version from storage data manager.") \
-    M(LoadManifestPartsCacheHits, "Cache(disk) hit count of loading parts from manifest") \
-    M(LoadManifestPartsCacheMisses, "Cache(disk) miss count of loading parts from manifest") \
+    M(LoadManifestPartsDiskCacheHits, "Disk cache hit count of loading parts from manifest") \
+    M(LoadManifestPartsDiskCacheMisses, "Disk cache miss count of loading parts from manifest") \
+    M(ManifestCacheHits, "Manifest cache hit count of loading parts from manifest") \
+    M(ManifestCacheMisses, "Manifest cache hit count of loading parts from manifest") \
 \
     M(DeserializeSkippedCompressedBytes, "Total compressed bytes skipped when deserialize") \
     M(TotalGranulesCount, "The total granules before skipping index needs to read. If there are multiple indexes, the value is the sum value.") \
     M(TotalSkippedGranules, "The total granules that skipping index dropped. If there are multiple indexes, the value is the sum value.") \
     M(GinIndexFilterResultCacheHit, "Number of posting list result cache hit") \
     M(GinIndexFilterResultCacheMiss, "Number of posting list result cache miss") \
+    M(PrimaryAndSecondaryIndexFilterTime, "Time used in primary index and secondary indices filterr, in micro seconds") \
+\
+    M(TableFinishStepPreClearHDFSTableMicroseconds, "") \
+    M(TableFinishStepPreClearS3TableMicroseconds, "") \
 
 namespace ProfileEvents
 {
@@ -1201,13 +1280,20 @@ uint64_t Counters::getIOReadTime(bool use_async_read) const
         if (use_async_read)
         {
             return counters[ProfileEvents::RemoteFSAsynchronousReadWaitMicroseconds]
-                + counters[ProfileEvents::RemoteFSSynchronousReadWaitMicroseconds] + counters[ProfileEvents::DiskReadElapsedMicroseconds];
+                + counters[ProfileEvents::RemoteFSSynchronousReadWaitMicroseconds]
+                + counters[ProfileEvents::DiskReadElapsedMicroseconds]
+                + counters_holder[ProfileEvents::ReadFromNexusFSAsynchronousWaitMicroseconds]
+                + counters_holder[ProfileEvents::ReadFromNexusFSSynchronousWaitMicroseconds];
         }
         // Else, we calculate the origin read IO time
         else
         {
-            return counters[ProfileEvents::HDFSReadElapsedMicroseconds] + counters[ProfileEvents::ReadBufferFromS3ReadMicroseconds]
-                + counters[ProfileEvents::DiskReadElapsedMicroseconds];
+            return counters[ProfileEvents::HDFSReadElapsedMicroseconds]
+                + counters[ProfileEvents::ReadBufferFromS3ReadMicroseconds]
+                + counters[ProfileEvents::DiskReadElapsedMicroseconds]
+                + counters_holder[ProfileEvents::ReadFromNexusFSAsynchronousWaitMicroseconds]
+                + counters_holder[ProfileEvents::ReadFromNexusFSSynchronousWaitMicroseconds]
+                - counters_holder[ProfileEvents::NexusFSReadFromSourceMicroseconds];
         }
     }
 
@@ -1227,14 +1313,19 @@ uint64_t Counters::Snapshot::getIOReadTime(bool use_async_read) const
         {
             return counters_holder[ProfileEvents::RemoteFSAsynchronousReadWaitMicroseconds]
                 + counters_holder[ProfileEvents::RemoteFSSynchronousReadWaitMicroseconds]
-                + counters_holder[ProfileEvents::DiskReadElapsedMicroseconds];
+                + counters_holder[ProfileEvents::DiskReadElapsedMicroseconds]
+                + counters_holder[ProfileEvents::ReadFromNexusFSAsynchronousWaitMicroseconds]
+                + counters_holder[ProfileEvents::ReadFromNexusFSSynchronousWaitMicroseconds];
         }
         // Else, we calculate the origin read IO time
         else
         {
             return counters_holder[ProfileEvents::HDFSReadElapsedMicroseconds]
                 + counters_holder[ProfileEvents::ReadBufferFromS3ReadMicroseconds]
-                + counters_holder[ProfileEvents::DiskReadElapsedMicroseconds];
+                + counters_holder[ProfileEvents::DiskReadElapsedMicroseconds]
+                + counters_holder[ProfileEvents::ReadFromNexusFSAsynchronousWaitMicroseconds]
+                + counters_holder[ProfileEvents::ReadFromNexusFSSynchronousWaitMicroseconds]
+                - counters_holder[ProfileEvents::NexusFSReadFromSourceMicroseconds];
         }
     }
 
@@ -1297,7 +1388,7 @@ void increment(Event event, Count amount, Metrics::MetricType type, LabelledMetr
     }
     catch (DB::Exception & e)
     {
-        LOG_ERROR(&Poco::Logger::get("ProfileEvents"), "Metrics emit metric failed: {}", e.message());
+        LOG_ERROR(getLogger("ProfileEvents"), "Metrics emit metric failed: {}", e.message());
     }
 }
 

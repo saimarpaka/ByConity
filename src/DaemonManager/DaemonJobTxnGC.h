@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <DaemonManager/DaemonJob.h>
 #include <Transaction/TxnTimestamp.h>
 #include <Transaction/TransactionCommon.h>
@@ -26,7 +27,7 @@ namespace DB::DaemonManager
 class TxnGCLog
 {
 public:
-    TxnGCLog(Poco::Logger * lg) : log(lg) { }
+    TxnGCLog(LoggerPtr lg) : log(lg) { }
     TxnGCLog(const TxnGCLog &) = delete;
     TxnGCLog & operator=(const TxnGCLog &) = delete;
     ~TxnGCLog()
@@ -59,7 +60,7 @@ public:
     std::atomic<UInt32> inactive{0};
 
 private:
-    Poco::Logger * log;
+    LoggerPtr log;
 };
 class DaemonJobTxnGC : public DaemonJob
 {
@@ -74,7 +75,13 @@ private:
     void cleanUndoBuffers(const TransactionRecords & records);
     void cleanTxnRecord(const TransactionRecord & record, TxnTimestamp current_time, std::vector<TxnTimestamp> & cleanTxnIds, TxnGCLog & summary);
     bool triggerCleanUndoBuffers();
-private:
+    /**
+     * @brief Get Oldest Timestamp of Transaction Record, for metrics purpose.
+     *
+     * @return Seconds since epoch.
+     */
+    int64_t getOldestTxnTimestamp();
+
     std::chrono::time_point<std::chrono::system_clock> lastCleanUBtime {std::chrono::system_clock::now()};
 };
 

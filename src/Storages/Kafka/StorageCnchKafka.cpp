@@ -60,7 +60,7 @@ StorageCnchKafka::StorageCnchKafka(
     const ASTPtr setting_changes_,
     const KafkaSettings & settings_)
     : IStorageCnchKafka(table_id_, context_, setting_changes_, settings_, columns_, constraints_),
-      log(&Poco::Logger::get(table_id_.getNameForLogs()  + " (StorageCnchKafka)"))
+      log(getLogger(table_id_.getNameForLogs()  + " (StorageCnchKafka)"))
 {
 }
 
@@ -114,16 +114,12 @@ void StorageCnchKafka::alter(const AlterCommands & commands, ContextPtr local_co
     bool kafka_table_is_active = tableIsActive();
 
     const String full_name = getStorageID().getNameForLogs();
-    if (kafka_table_is_active)
-    {
-        LOG_TRACE(log, "Stop consumption before altering table {}", full_name);
-        daemon_manager->controlDaemonJob(getStorageID(), CnchBGThreadType::Consumer, CnchBGThreadAction::Stop, local_context->getCurrentQueryId());
-    }
 
     SCOPE_EXIT({
         if (kafka_table_is_active)
         {
-            LOG_TRACE(log, "Restart consumption no matter if ALTER succ for table {}", full_name);
+            usleep(500 * 1000);
+            LOG_DEBUG(log, "Restart consumption no matter if ALTER succ for table {}", full_name);
             try
             {
                 daemon_manager->controlDaemonJob(getStorageID(), CnchBGThreadType::Consumer, CnchBGThreadAction::Start, local_context->getCurrentQueryId());
@@ -135,11 +131,18 @@ void StorageCnchKafka::alter(const AlterCommands & commands, ContextPtr local_co
         }
     });
 
-    /// start alter
-    LOG_TRACE(log, "Start altering table {}", full_name);
+    if (kafka_table_is_active)
+    {
+        LOG_DEBUG(log, "Stop consumption before altering table {}", full_name);
+        /// RPC timeout may occur here; remember to restart consume if needs to
+        daemon_manager->controlDaemonJob(getStorageID(), CnchBGThreadType::Consumer, CnchBGThreadAction::Stop, local_context->getCurrentQueryId());
+    }
 
-    StorageInMemoryMetadata new_metadata = getInMemoryMetadata();
-    StorageInMemoryMetadata old_metadata = getInMemoryMetadata();
+    /// start alter
+    LOG_DEBUG(log, "Start altering table {}", full_name);
+
+    StorageInMemoryMetadata new_metadata = getInMemoryMetadataCopy();
+    StorageInMemoryMetadata old_metadata = getInMemoryMetadataCopy();
 
     TransactionCnchPtr txn = local_context->getCurrentTransaction();
     auto action = txn->createAction<DDLAlterAction>(shared_from_this(), local_context->getSettingsRef(), local_context->getCurrentQueryId());
@@ -200,10 +203,7 @@ bool StorageCnchKafka::tableIsActive() const
 {
     auto catalog = getGlobalContext()->getCnchCatalog();
     std::optional<CnchBGThreadStatus> thread_status = catalog->getBGJobStatus(getStorageUUID(), CnchBGThreadType::Consumer);
-    if ((!thread_status) ||
-        (*thread_status == CnchBGThreadStatus::Running))
-        return true;
-    return false;
+    return (!thread_status) || (*thread_status == CnchBGThreadStatus::Running);
 }
 
 /// TODO: merge logic of `checkDependencies` in KafkaConsumeManager
@@ -221,7 +221,7 @@ StoragePtr StorageCnchKafka::tryGetTargetTable()
         if (!mv)
             throw Exception("Dependence for CnchKafka should be MaterializedView, but got "
                             + view->getName(), ErrorCodes::LOGICAL_ERROR);
-        
+
         if (mv->async())
            continue;
 

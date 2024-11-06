@@ -15,7 +15,6 @@ namespace ErrorCodes
     extern const int BAD_ARGUMENTS;
     extern const int NOT_IMPLEMENTED;
     extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
-    extern const int BITENGINE_WRITE_DICT_CONFLICT;
     extern const int CNCH_TRANSACTION_COMMIT_TIMEOUT;
     extern const int METASTORE_OPERATION_ERROR;
 }
@@ -41,7 +40,7 @@ StorageDictCloudMergeTree::StorageDictCloudMergeTree(
     )
     , split_writer(*this, IStorage::StorageLocation::AUXILITY)
 {
-    log = &Poco::Logger::get(table_id_.getNameForLogs() + " (DictCloudMergeTree)");
+    log = ::getLogger(table_id_.getNameForLogs() + " (DictCloudMergeTree)");
 
     init();
 }
@@ -62,6 +61,23 @@ void StorageDictCloudMergeTree::init()
     dict_column_types = physical_columns;
 
     auto key_type = physical_columns.begin()->type;
+}
+
+template <typename KEY_TYPE>
+MutableColumnPtr StorageDictCloudMergeTree::generateKeyConstraintColumn(const ColumnBitMap64 & bitmap_column)
+{
+    MutableColumnPtr constraint_key_column = ColumnVector<KEY_TYPE>::create();
+    typename ColumnVector<KEY_TYPE>::Container & column_data
+        = typeid_cast<ColumnVector<KEY_TYPE> *>(constraint_key_column.get())->getData();
+    column_data.reserve(bitmap_column.size());
+
+    for (size_t i = 0; i < bitmap_column.size(); ++i)
+    {
+        const auto & bitmap = bitmap_column.getBitMapAt(i);
+        column_data.emplace_back(*bitmap.begin());
+    }
+
+    return constraint_key_column;
 }
 
 void registerStorageDictCloud(StorageFactory & factory)

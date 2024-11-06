@@ -19,14 +19,15 @@
 namespace DB
 {
 
-void OptimizeTrivialCount::rewrite(QueryPlan & plan, ContextMutablePtr context) const
+bool OptimizeTrivialCount::rewrite(QueryPlan & plan, ContextMutablePtr context) const
 {
-    if (context->getSettingsRef().max_parallel_replicas > 1 )
-        return;
+    if (context->getSettingsRef().max_parallel_replicas > 1)
+        return false;
     TrivialCountVisitor visitor{context, plan.getCTEInfo()};
     Void v;
     auto result = VisitorUtil::accept(plan.getPlanNode(), visitor, v);
     plan.update(result);
+    return true;
 }
 
 PlanNodePtr TrivialCountVisitor::visitAggregatingNode(AggregatingNode & node, Void & v)
@@ -135,13 +136,12 @@ PlanNodePtr TrivialCountVisitor::visitAggregatingNode(AggregatingNode & node, Vo
     if (!num_rows)
         return visitPlanNode(node, v);
 
-    DatabaseAndTableName database_and_table = {storage->getDatabaseName(), storage->getTableName()};
     auto read_row_count= std::make_shared<ReadStorageRowCountStep>(node.getCurrentDataStream().header,
                                                                     select_query.clone(),
                                                                     agg_step.getParams().aggregates[0],
-                                                                    num_rows.value(),
                                                                     agg_step.isFinal(),
-                                                                    database_and_table);
+                                                                    storage->getStorageID());
+    read_row_count->setNumRows(num_rows.value());                                                            
     auto new_child_node= PlanNodeBase::createPlanNode(context->nextNodeId(), std::move(read_row_count), {});
     return new_child_node->shared_from_this();
 }

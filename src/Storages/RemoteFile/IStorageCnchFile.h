@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Common/Logger.h>
 #include <MergeTreeCommon/CnchStorageCommon.h>
 #include <Storages/RemoteFile/CnchFileCommon.h>
 #include <Storages/RemoteFile/CnchFileSettings.h>
@@ -44,7 +45,9 @@ public:
         size_t max_block_size,
         unsigned num_streams) override;
 
-    virtual Strings readFileList() = 0;
+    virtual Strings readFileList(ContextPtr query_context) = 0;
+
+    virtual void clear(ContextPtr query_context) = 0;
 
     /// read remote file parts by server local, not send resource to worker
     virtual void readByLocal(
@@ -79,8 +82,6 @@ public:
 
     virtual NamesAndTypesList getVirtuals() const override;
 
-    virtual void tryUpdateFSClient(const ContextPtr & /*query_context*/) { }
-
     QueryProcessingStage::Enum
     getQueryProcessingStage(ContextPtr query_context, QueryProcessingStage::Enum stage, const StorageSnapshotPtr & storage_snapshot, SelectQueryInfo & query_info) const override;
     
@@ -104,7 +105,7 @@ public:
     Block virtual_header;
 
 private:
-    Poco::Logger * log = &Poco::Logger::get("StorageCnchFile");
+    LoggerPtr log = getLogger("StorageCnchFile");
 };
 
 }

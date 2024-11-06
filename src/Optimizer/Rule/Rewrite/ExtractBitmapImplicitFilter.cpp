@@ -101,7 +101,8 @@ TransformResult ExtractBitmapImplicitFilter::transformImpl(PlanNodePtr node, con
     for (const auto & parameter : parameters_map)
     {
         auto [in_ast, elem_size] = createInFunctionForBitMapParameter(parameter.first, parameter.second);
-        functions.push_back(in_ast);
+        if (in_ast)
+            functions.push_back(in_ast);
     }
 
     auto implicit_filter = PredicateUtils::combineDisjunctsWithDefault<false>(functions, PredicateConst::TRUE_VALUE);
@@ -110,7 +111,7 @@ TransformResult ExtractBitmapImplicitFilter::transformImpl(PlanNodePtr node, con
         return {};
 
     LOG_DEBUG(
-        &Poco::Logger::get("ExtractBitmapImplicitFilter"),
+        getLogger("ExtractBitmapImplicitFilter"),
         "Extract bitmap implicit filter for plan node {}, extracted filter: {}",
         node->getId(),
         serializeAST(*implicit_filter));

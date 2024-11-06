@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Common/Logger.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DistributedStages/PlanSegment.h>
 #include <Optimizer/CardinalityEstimate/CardinalityEstimator.h>
@@ -39,7 +40,7 @@ public:
 
 private:
     bool isEnabled(ContextMutablePtr context) const override { return context->getSettingsRef().enable_runtime_filter; }
-    void rewrite(QueryPlan & plan, ContextMutablePtr context) const override;
+    bool rewrite(QueryPlan & plan, ContextMutablePtr context) const override;
 
     class AddRuntimeFilterRewriter;
     class RuntimeFilterInfoExtractor;
@@ -55,13 +56,15 @@ public:
         : context(std::move(context_)), cte_info(cte_info_), cte_helper(cte_info_)
     {
     }
-    void rewrite(QueryPlan & plan);
+    bool rewrite(QueryPlan & plan);
     PlanPropEquivalences visitPlanNode(PlanNodeBase & node, Void & c) override;
     PlanPropEquivalences visitJoinNode(JoinNode & node, Void & c) override;
     PlanPropEquivalences visitCTERefNode(CTERefNode & node, Void & c) override;
 
     PlanPropEquivalences replaceChildren(
         PlanNodeBase & node, PlanNodes children, std::vector<SymbolEquivalencesPtr> children_equivalences, PropertySet input_properties);
+
+    RuntimeFilterId getId() const { return id; }
 
 private:
     RuntimeFilterId nextId() { return id++; }
@@ -70,7 +73,7 @@ private:
     ContextMutablePtr context;
     CTEInfo & cte_info;
     SimpleCTEVisitHelper<PlanPropEquivalences> cte_helper;
-    Poco::Logger * logger = &Poco::Logger::get("AddRuntimeFilters");
+    LoggerPtr logger = getLogger("AddRuntimeFilters");
 };
 
 struct RuntimeFilterContext

@@ -16,12 +16,13 @@
 #include "InsertAction.h"
 
 #include <Catalog/Catalog.h>
-#include <Interpreters/ServerPartLog.h>
-#include <Storages/StorageCnchMergeTree.h>
-#include <DataTypes/ObjectUtils.h>
-#include <Common/Exception.h>
-#include <common/logger_useful.h>
 #include <CloudServices/CnchDedupHelper.h>
+#include <Common/Exception.h>
+#include <DataTypes/ObjectUtils.h>
+#include <Interpreters/ServerPartLog.h>
+#include <Storages/MergeTree/MergeTreeBgTaskStatistics.h>
+#include <Storages/StorageCnchMergeTree.h>
+#include <common/logger_useful.h>
 
 
 namespace DB
@@ -31,6 +32,7 @@ namespace ErrorCodes
 {
     extern const int LOGICAL_ERROR;
 }
+
 
 void InsertAction::appendPart(MutableMergeTreeDataPartCNCHPtr part)
 {
@@ -57,7 +59,7 @@ void InsertAction::executeV1(TxnTimestamp commit_time)
 
     String log_table_name = table->getDatabaseName() + "." + table->getTableName();
 
-    // Set the commit time of parts and delete_bitmaps must be set, otherwise they are invisible.
+    /// Set the commit time of parts and delete_bitmaps must be set, otherwise they are invisible.
     for (auto & part : parts)
         part->commit_time = commit_time;
 
@@ -67,7 +69,8 @@ void InsertAction::executeV1(TxnTimestamp commit_time)
     auto catalog = global_context.getCnchCatalog();
     bool write_manifest = cnch_table->getSettings()->enable_publish_version_on_commit;
     catalog->finishCommit(table, txn_id, commit_time, {parts.begin(), parts.end()}, delete_bitmaps, false, /*preallocate_mode=*/ false, write_manifest);
-    ServerPartLog::addNewParts(getContext(), table->getStorageID(), ServerPartLogElement::INSERT_PART, parts, {}, txn_id, /*error=*/ false);
+    ServerPartLog::addNewParts(getContext(), table->getStorageID(), ServerPartLogElement::INSERT_PART, parts, {},
+                                txn_id, /*error=*/ false, {}, 0, 0, from_attach);
 }
 
 void InsertAction::executeV2()
@@ -98,24 +101,26 @@ void InsertAction::postCommit(TxnTimestamp commit_time)
     for (auto & part : parts)
         part->commit_time = commit_time;
 
-    // set commit flag for dynamic object column schema
+    /// set commit flag for dynamic object column schema
     if (table && table->getInMemoryMetadataPtr()->hasDynamicSubcolumns())
         global_context.getCnchCatalog()->commitObjectPartialSchema(txn_id);
 
-    ServerPartLog::addNewParts(getContext(), table->getStorageID(), ServerPartLogElement::INSERT_PART, parts, staged_parts, txn_id, /*error=*/ false);
+    ServerPartLog::addNewParts(getContext(), table->getStorageID(), ServerPartLogElement::INSERT_PART, parts, staged_parts,
+                                txn_id, /*error=*/ false, {}, 0, 0, from_attach);
 }
 
 void InsertAction::abort()
 {
-    // clear parts in kv
-    // skip part cache to avoid blocking by write lock of part cache for long time
+    /// clear parts in kv
+    /// skip part cache to avoid blocking by write lock of part cache for long time
     global_context.getCnchCatalog()->clearParts(table, Catalog::CommitItems{{parts.begin(), parts.end()}, delete_bitmaps, {staged_parts.begin(), staged_parts.end()}});
 
-    // set commit flag for dynamic object column schema
+    /// set commit flag for dynamic object column schema
     if (table && table->getInMemoryMetadataPtr()->hasDynamicSubcolumns())
         global_context.getCnchCatalog()->abortObjectPartialSchema(txn_id);
 
-    ServerPartLog::addNewParts(getContext(), table->getStorageID(), ServerPartLogElement::INSERT_PART, parts, staged_parts, txn_id, /*error=*/ true);
+    ServerPartLog::addNewParts(getContext(), table->getStorageID(), ServerPartLogElement::INSERT_PART, parts, staged_parts,
+                                 txn_id, /*error=*/ true, {}, 0, 0, from_attach);
 }
 
 UInt32 InsertAction::collectNewParts() const

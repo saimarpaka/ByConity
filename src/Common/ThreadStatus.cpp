@@ -82,7 +82,7 @@ ThreadStatus::ThreadStatus()
     last_rusage = std::make_unique<RUsageCounters>();
 
     memory_tracker.setDescription("(for thread)");
-    log = &Poco::Logger::get("ThreadStatus");
+    log = getLogger("ThreadStatus");
 
     current_thread = this;
 
@@ -212,6 +212,15 @@ void ThreadStatus::onFatalError()
 {
     if (fatal_error_callback)
         fatal_error_callback();
+}
+
+void ThreadStatus::flushUntrackedMemory()
+{
+    if (untracked_memory == 0)
+        return;
+
+    memory_tracker.adjustWithUntrackedMemory(untracked_memory);
+    untracked_memory = 0;
 }
 
 ThreadStatus * MainThreadStatus::main_thread = nullptr;

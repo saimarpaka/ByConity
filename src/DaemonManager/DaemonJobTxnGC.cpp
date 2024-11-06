@@ -13,11 +13,13 @@
  * limitations under the License.
  */
 
-#include <DaemonManager/DaemonJobTxnGC.h>
+#include <chrono>
 #include <Catalog/Catalog.h>
-#include <DaemonManager/DaemonFactory.h>
 #include <CloudServices/CnchServerClient.h>
 #include <CloudServices/CnchServerClientPool.h>
+#include <DaemonManager/DaemonFactory.h>
+#include <DaemonManager/DaemonJobTxnGC.h>
+#include <DaemonManager/Metrics/MetricsData.h>
 #include <MergeTreeCommon/CnchTopologyMaster.h>
 #include <Transaction/TransactionCommon.h>
 #include <Common/Exception.h>
@@ -37,12 +39,24 @@ namespace DB::DaemonManager
 
 bool DaemonJobTxnGC::executeImpl()
 {
-
     const Context & context = *getContext();
     String last_start_key = start_key;
+    size_t wanted_txn_number = context.getConfigRef().getInt("cnch_txn_clean_batch_size", 100000);
+    /// Normally, older transaction get higher priority to be cleaned,
+    /// so we will always scan from the start.
+    /// In some (rare) cases, we want to clean transactions in the middle of the transaction lists,
+    /// that's where `cnch_txn_clean_round_robin` works.
+    /// Please note that "round robin" might not work as you expected,
+    /// as transactions inserted fast at the end of the lists, "another round"
+    /// might never come.
+    bool round_robin = context.getConfigRef().getBool("cnch_txn_clean_round_robin", false);
+    if (!round_robin)
+        start_key = "";
     auto txn_records = context.getCnchCatalog()->getTransactionRecordsForGC(
-        start_key, context.getConfigRef().getInt("cnch_txn_clean_batch_size", 200000));
-    LOG_DEBUG(log, "start_key changed from: {} to {}", last_start_key, start_key);
+        start_key, wanted_txn_number);
+
+    LOG_DEBUG(
+        log, "start_key changed from: {} to {} (wanted {}, get {})", last_start_key, start_key, wanted_txn_number, txn_records.size());
     if (!txn_records.empty())
     {
         cleanTxnRecords(txn_records);
@@ -54,6 +68,7 @@ bool DaemonJobTxnGC::executeImpl()
         lastCleanUBtime = std::chrono::system_clock::now();
     }
 
+    oldest_transaction.store(getOldestTxnTimestamp());
     return true;
 }
 
@@ -275,4 +290,18 @@ std::vector<TxnTimestamp> extractLastElements(std::vector<TxnTimestamp> & from, 
     return res;
 }
 
+int64_t DaemonJobTxnGC::getOldestTxnTimestamp()
+{
+    const Context & context = *getContext();
+    String start_from_begin;
+    auto txn_records = context.getCnchCatalog()->getTransactionRecordsForGC(start_from_begin, 1);
+    if (!txn_records.empty())
+    {
+        return txn_records.begin()->txnID().toSecond();
+    }
+    else
+    {
+        return duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+}
 }

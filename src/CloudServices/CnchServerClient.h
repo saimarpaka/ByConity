@@ -88,7 +88,8 @@ public:
         const ConstStoragePtr & table,
         const SelectQueryInfo & query_info,
         const Names & column_names,
-        const TxnTimestamp & txn_id);
+        const TxnTimestamp & txn_id,
+        const bool & ignore_ttl);
 
     void redirectCommitParts(
         const StoragePtr & table,
@@ -117,7 +118,8 @@ public:
         const Strings & detached_bitmap_names,
         const DeleteBitmapMetaPtrVector & detached_bitmaps,
         const DeleteBitmapMetaPtrVector & bitmaps,
-        const DB::Protos::DetachAttachType & type);
+        const DB::Protos::DetachAttachType & type,
+        const UInt64 & txn_id);
 
     void redirectDetachAttachedS3Parts(
         const StoragePtr & to_table,
@@ -132,9 +134,10 @@ public:
         const DeleteBitmapMetaPtrVector & bitmaps,
         const std::vector<std::pair<String, String>> & detached_part_metas,
         const std::vector<std::pair<String, String>> & detached_bitmap_metas,
-        const DB::Protos::DetachAttachType & type);
+        const DB::Protos::DetachAttachType & type,
+        const UInt64 & txn_id);
 
-    void commitParts(
+    UInt32 commitParts(
         const TxnTimestamp & txn_id,
         ManipulationType type,
         MergeTreeMetaBase & storage,
@@ -146,7 +149,10 @@ public:
         const MySQLBinLogInfo & binlog = {},
         const UInt64 peak_memory_usage = 0);
 
-    void precommitParts(
+    /**
+     * @return UInt32 dedup impl version for unique table, current valid value is 1 or 2. 1 means old impl which will dedup in write suffix stage, 2 means new impl which will dedup in txn commit stage. 
+     */
+    UInt32 precommitParts(
         ContextPtr context,
         const TxnTimestamp & txn_id,
         ManipulationType type,
@@ -166,6 +172,12 @@ public:
     getTableInfo(const std::vector<std::shared_ptr<Protos::TableIdentifier>> & tables);
     void controlCnchBGThread(const StorageID & storage_id, CnchBGThreadType type, CnchBGThreadAction action);
     void cleanTransaction(const TransactionRecord & txn_record);
+    /**
+     * @brief Clean undo buffers with the given txn (only) on target server.
+     *
+     * @param txn_record The transaction to which the Undo Buffer belongs.
+     */
+    void cleanUndoBuffers(const TransactionRecord & txn_record);
     std::set<UUID> getDeletingTablesInGlobalGC();
     bool removeMergeMutateTasksOnPartitions(const StorageID &, const std::unordered_set<String> &);
 
@@ -191,6 +203,14 @@ public:
     void executeOptimize(const StorageID & storage_id, const String & partition_id, bool enable_try, bool mutations_sync, UInt64 timeout_ms);
     void notifyAccessEntityChange(IAccessEntity::Type type, const String & name);
 
+    brpc::CallId submitBackupTask(const String & backup_id, const String & backup_command);
+
+    std::optional<String> getRunningBackupTask();
+
+    void removeRunningBackupTask(const String & backup_id);
+
+    UInt32 getDedupImplVersion(const TxnTimestamp & txn_id, const UUID & uuid);
+
 #if USE_MYSQL
     void submitMaterializedMySQLDDLQuery(const String & database_name, const String & sync_thread, const String & query, const MySQLBinLogInfo & binlog);
     void reportHeartBeatForSyncThread(const String & database_name, const String & sync_thread);
@@ -202,6 +222,8 @@ public:
     void notifyTableCreated(const UUID & storage_uuid, int64_t cnch_notify_table_created_rpc_timeout_ms);
 
     void notifyAccessEntityChange(IAccessEntity::Type type, const String & name, const UUID & uuid);
+
+    void checkDelayInsertOrThrowIfNeeded(UUID storage_uuid);
 private:
     std::unique_ptr<Protos::CnchServerService_Stub> stub;
 };

@@ -71,18 +71,20 @@ void executePlanSegmentInternal(
     if (!plan_segment_instance)
         throw Exception("Cannot execute empty plan segment", ErrorCodes::LOGICAL_ERROR);
 
-    if (context->getSettingsRef().debug_plan_generation)
+    const auto & settings = context->getSettingsRef();
+    if (settings.debug_plan_generation)
         return;
 
+    bool inform_success_status = settings.enable_wait_for_post_processing || settings.bsp_mode || settings.report_segment_profiles;
     auto executor = std::make_shared<PlanSegmentExecutor>(
         std::move(plan_segment_instance), std::move(context), std::move(process_plan_segment_entry));
     if (async)
     {
-        ThreadFromGlobalPool async_thread([executor = std::move(executor)]() mutable {
+        ThreadFromGlobalPool async_thread([executor = std::move(executor), inform_success_status = inform_success_status]() mutable {
             auto result = executor->execute();
             executor.reset(); /// release executor
             if (result)
-                reportExecutionResult(*result);
+                reportExecutionResult(*result, inform_success_status);
         });
         async_thread.detach();
         return;
@@ -92,7 +94,7 @@ void executePlanSegmentInternal(
         auto result = executor->execute();
         executor.reset(); /// release executor
         if (result)
-            reportExecutionResult(*result);
+            reportExecutionResult(*result, inform_success_status);
     }
 }
 
@@ -117,8 +119,8 @@ static void OnSendPlanSegmentCallback(
     if (cntl->Failed())
     {
         LOG_ERROR(
-            &Poco::Logger::get("executePlanSegment"),
-            "send plansegment to {} failed, error: {},  msg: {}",
+            getLogger("executePlanSegment"),
+            "Send plansegment to {} failed, error: {},  msg: {}",
             butil::endpoint2str(cntl->remote_side()).c_str(),
             cntl->ErrorText(),
             response->message());
@@ -130,8 +132,7 @@ static void OnSendPlanSegmentCallback(
     }
     else
     {
-        LOG_TRACE(
-            &Poco::Logger::get("executePlanSegment"), "send plansegment to {} success", butil::endpoint2str(cntl->remote_side()).c_str());
+        LOG_TRACE(getLogger("executePlanSegment"), "Send plansegment to {} success", butil::endpoint2str(cntl->remote_side()).c_str());
         async_context->asyncComplete(cntl->call_id(), result);
     }
 }
@@ -172,6 +173,11 @@ void prepareQueryCommonBuf(
     const String & quota_key = client_info.quota_key;
     if (!client_info.quota_key.empty())
         query_common.set_quota(quota_key);
+    if (!client_info.parent_initial_query_id.empty())
+    {
+        query_common.set_parent_query_id(client_info.parent_initial_query_id);
+        query_common.set_is_internal_query(context->isInternalQuery());
+    }
 
     butil::IOBuf query_common_buf;
     butil::IOBufAsZeroCopyOutputStream wrapper(&common_buf);
@@ -195,11 +201,21 @@ void executePlanSegmentRemotelyWithPreparedBuf(
     request.set_brpc_protocol_major_revision(DBMS_BRPC_PROTOCOL_MAJOR_VERSION);
     request.set_plan_segment_id(segment_id);
     request.set_parallel_id(execution_info.parallel_id);
-    request.set_retry_id(execution_info.retry_id);
+    request.set_attempt_id(execution_info.attempt_id);
     if (execution_info.source_task_filter.isValid())
         *request.mutable_source_task_filter() = execution_info.source_task_filter.toProto();
 
     execution_info.execution_address.toProto(*request.mutable_execution_address());
+    for (const auto & iter : execution_info.sources)
+    {
+        for (const auto & source : iter.second)
+        {
+            source.toProto(*request.add_sources());
+        }
+    }
+
+    if (execution_info.worker_epoch > 0)
+        request.set_worker_epoch(execution_info.worker_epoch);
 
     butil::IOBuf attachment;
 
@@ -222,7 +238,7 @@ void executePlanSegmentRemotelyWithPreparedBuf(
     cntl->request_attachment().append(attachment.movable());
     cntl->set_timeout_ms(context.getSettingsRef().send_plan_segment_timeout_ms.totalMilliseconds());
     google::protobuf::Closure * done = brpc::NewCallback(
-        &OnSendPlanSegmentCallback, response, cntl, rpc_channel, context.getWorkerStatusManager(), async_context, worker_id);
+        &OnSendPlanSegmentCallback, response, cntl, std::move(rpc_channel), context.getWorkerStatusManager(), async_context, worker_id);
     async_context->addCallId(call_id);
     manager_stub.submitPlanSegment(cntl, &request, response, done);
 }
@@ -267,7 +283,7 @@ void executePlanSegmentsRemotely(
     auto call_id = cntl->call_id();
     cntl->request_attachment().append(attachment.movable());
     google::protobuf::Closure * done = brpc::NewCallback(
-        &OnSendPlanSegmentCallback, response, cntl, rpc_channel, context.getWorkerStatusManager(), async_context, worker_id);
+        &OnSendPlanSegmentCallback, response, cntl, std::move(rpc_channel), context.getWorkerStatusManager(), async_context, worker_id);
     async_context->addCallId(call_id);
     manager_stub.submitPlanSegments(cntl, &request, response, done);
 }

@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Storages/MergeTree/DeleteBitmapMeta.h>
 #include <MergeTreeCommon/ReplacingSortedKeysIterator.h>
 #include <Transaction/TxnTimestamp.h>
@@ -38,7 +39,7 @@ public:
     MergeTreeDataDeduper(
         const MergeTreeMetaBase & data_,
         ContextPtr context_,
-        const CnchDedupHelper::DedupMode & dedup_mode_ = CnchDedupHelper::DedupMode::UPSERT);
+        const CnchDedupHelper::DedupMode & dedup_mode_);
 
     /// Remove duplicate keys among visible, staged, and uncommitted parts.
     /// Assumes that
@@ -60,6 +61,8 @@ public:
     bool isCancelled() { return deduper_cancelled.load(std::memory_order_relaxed); }
 
     void setCancelled() { deduper_cancelled = true; }
+
+    void setDeduperContext(ContextPtr deduper_context) { context = deduper_context; }
 
     struct DedupTask
     {
@@ -99,6 +102,65 @@ private:
     /// The result bitmap(could be nullptr) for new_parts[j] is stored in res[visible_parts.size() + j].
     DeleteBitmapVector dedupImpl(const IMergeTreeDataPartsVector & visible_parts, const IMergeTreeDataPartsVector & new_parts, DedupTaskPtr & dedup_task);
 
+    /// Handling the case when new parts have partial update parts.
+    /// Differentiate into different sub-iterations according to the type of part(normal_parts or partial_update_parts)
+    DeleteBitmapVector processDedupSubTaskInPartialUpdateMode(const IMergeTreeDataPartsVector & visible_parts, const IMergeTreeDataPartsVector & new_parts, DedupTaskPtr & dedup_task, std::vector<bool> & need_dump_bitmap);
+
+    /// For partial update mode: Restore block from new parts
+    std::vector<Block> restoreBlockFromNewParts(
+        const IMergeTreeDataPartsVector & current_dedup_new_parts,
+        const DedupTaskPtr & dedup_task,
+        bool & optimize_for_same_update_columns,
+        NameSet & same_update_column_set);
+
+    /// For partial update mode: Remove duplicate keys in block and get replace info.
+    size_t removeDupKeysInPartialUpdateMode(
+        Block & block,
+        ColumnPtr version_column,
+        IColumn::Filter & filter,
+        PaddedPODArray<UInt32> & replace_dst_indexes,
+        PaddedPODArray<UInt32> & replace_src_indexes);
+
+    /// For partial update mode:
+    /// Given input keys, for each key, search in the existing parts to find the duplicated key.
+    /// Returns: {part_index, rowid, row version} for each key. If a key is never existed before, its part_index will be -1
+    SearchKeysResult searchPartForKeys(const IMergeTreeDataPartsVector & visible_parts, UniqueKeys & keys);
+
+    /// For partial update mode: read data from part.
+    void readColumnsFromStorage(const IMergeTreeDataPartPtr & part, RowidPairs & rowid_pairs,
+        Block & to_block, PaddedPODArray<UInt32> & to_block_rowids, const DedupTaskPtr & dedup_task);
+
+    void readColumnsFromStorageParallel(const IMergeTreeDataPartPtr & part, const RowidPairs & rowid_pairs,
+        Block & to_block, PaddedPODArray<UInt32> & to_block_rowids, const DedupTaskPtr & dedup_task);
+
+    /// For partial update mode: replace data in block.
+    void replaceColumnsAndFilterData(
+        Block & block,
+        Block & columns_from_storage,
+        IColumn::Filter & filter,
+        size_t & num_filtered,
+        PaddedPODArray<UInt32> & block_rowids,
+        PaddedPODArray<UInt32> & replace_dst_indexes,
+        PaddedPODArray<UInt32> & replace_src_indexes,
+        const IMergeTreeDataPartsVector & current_dedup_new_parts,
+        const DedupTaskPtr & dedup_task,
+        const bool & optimize_for_same_update_columns,
+        const NameSet & same_update_column_set);
+
+    /// For partial update mode: parse update columns & fill default filter
+    void parseUpdateColumns(
+        String columns_name,
+        std::unordered_map<String, ColumnVector<UInt8>::MutablePtr> & default_filters,
+        std::function<bool(String)> check_column,
+        std::function<String(size_t, size_t)> get_column_by_index,
+        size_t idx);
+
+    /// For partial update mode: generate & commit partial part with data and unique index.
+    IMergeTreeDataPartsVector generateAndCommitPartialPartInPartialUpdateMode(
+        Block & block,
+        const IMergeTreeDataPartsVector & new_parts,
+        const DedupTaskPtr & dedup_task);
+
     DeleteBitmapVector repairImpl(const IMergeTreeDataPartsVector & parts);
 
     void dedupKeysWithParts(
@@ -116,6 +178,32 @@ private:
         const bool & bucket_level_dedup,
         TxnTimestamp txn_id);
 
+    size_t prepareBitmapsToDump(
+        const IMergeTreeDataPartsVector & visible_parts,
+        const IMergeTreeDataPartsVector & new_parts,
+        const DeleteBitmapVector & bitmaps,
+        TxnTimestamp txn_id,
+        LocalDeleteBitmaps & res);
+
+    size_t prepareBitmapsForPartialUpdate(
+        const IMergeTreeDataPartsVector & visible_parts,
+        const IMergeTreeDataPartsVector & new_parts,
+        const DeleteBitmapVector & bitmaps,
+        TxnTimestamp txn_id,
+        LocalDeleteBitmaps & res,
+        const std::vector<bool> & need_dump_bitmap);
+
+    DeleteBitmapVector generateNextIterationBitmaps(
+        const IMergeTreeDataPartsVector & visible_parts,
+        const IMergeTreeDataPartsVector & new_parts,
+        const DeleteBitmapVector & bitmaps,
+        TxnTimestamp txn_id);
+
+    void logDedupDetail(const IMergeTreeDataPartsVector & visible_parts,
+        const IMergeTreeDataPartsVector & new_parts,
+        const DedupTaskPtr & task,
+        bool is_sub_iteration);
+
     /// Used to protect dedup_tasks member change & iter change
     mutable std::mutex dedup_tasks_mutex;
     /// Sub dedup tasks after calling convertIntoSubDedupTasks
@@ -125,7 +213,7 @@ private:
 
     const MergeTreeMetaBase & data;
     ContextPtr context;
-    Poco::Logger * log;
+    LoggerPtr log;
     VersionMode version_mode;
     CnchDedupHelper::DedupMode dedup_mode;
 };

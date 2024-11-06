@@ -21,9 +21,9 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Access/RowPolicy.h>
 #include <CloudServices/CnchBGThreadCommon.h>
-#include <CloudServices/CnchBGThreadPartitionSelector.h>
 #include <Core/Block.h>
 #include <Core/NamesAndTypes.h>
 #include <Core/Settings.h>
@@ -47,6 +47,7 @@
 #include <Storages/MergeTree/MergeTreeMutationStatus.h>
 #include <Transaction/TxnTimestamp.h>
 #include <Common/AdditionalServices.h>
+#include <Common/SettingsChanges.h>
 #include <Common/CGroup/CGroupManager.h>
 #include <Common/MultiVersion.h>
 #include <Common/OpenTelemetryTraceContext.h>
@@ -226,8 +227,6 @@ class CnchWorkerClientPools;
 class ICnchBGThread;
 using CnchBGThreadPtr = std::shared_ptr<ICnchBGThread>;
 class CnchBGThreadsMap;
-class CnchBGThreadPartitionSelector;
-using PartitionSelectorPtr = std::shared_ptr<CnchBGThreadPartitionSelector>;
 struct ClusterTaskProgress;
 
 class IOutputFormat;
@@ -333,14 +332,18 @@ using AsynchronousReaderPtr = std::shared_ptr<IAsynchronousReader>;
 
 class IOUringReader;
 
-class GinIndexStoreFactory;
-struct GinIndexStoreCacheSettings;
+class NexusFS;
+using NexusFSPtr = std::shared_ptr<NexusFS>;
+
+class GINStoreReaderFactory;
+struct GINStoreReaderFactorySettings;
 
 class GlobalTxnCommitter;
 using GlobalTxnCommitterPtr = std::shared_ptr<GlobalTxnCommitter>;
 class GlobalDataManager;
 using GlobalDataManagerPtr = std::shared_ptr<GlobalDataManager>;
 
+class ManifestCache;
 
 enum class ServerType
 {
@@ -458,6 +461,7 @@ protected:
     CopyableAtomic<IResourceGroup *> resource_group{nullptr}; /// Current resource group.
     String current_database;
     Settings settings; /// Setting for query execution.
+    SettingsChanges settings_changes; // query level or session level settings changes
 
     using ProgressCallback = std::function<void(const Progress & progress)>;
     ProgressCallback progress_callback; /// Callback for tracking progress of query execution.
@@ -590,7 +594,7 @@ protected:
     QueueThrottlerDeleterPtr queue_throttler_ptr;
     bool enable_worker_fault_tolerance = false;
 
-    timespec query_expiration_timestamp{};
+    std::optional<timespec> query_expiration_timestamp;
 
 public:
     // Top-level OpenTelemetry trace context for the query. Makes sense only for a query context.
@@ -645,6 +649,7 @@ protected:
     bool has_tenant_id_in_username = false;
     String tenant_id;
     String current_catalog;
+    bool already_outfile = false;
 };
 
 /** A set of known objects that can be used in the query.
@@ -971,6 +976,9 @@ public:
 
     Settings getSettings() const;
     void setSettings(const Settings & settings_);
+    void setSessionSettingsChanges(const SettingsChanges & settings_changes_) const { getSessionContext()->settings_changes = settings_changes_; }
+    void applySessionSettingsChanges() { applySettingsChanges(getSessionContext()->settings_changes); }
+    void clearSessionSettingsChanges() const { getSessionContext()->settings_changes.clear(); }
 
     /// Set settings by name.
     void setSetting(const StringRef & name, const String & value);
@@ -1007,7 +1015,7 @@ public:
 
     /// I/O formats.
     BlockInputStreamPtr getInputFormat(const String & name, ReadBuffer & buf, const Block & sample, UInt64 max_block_size) const;
-   BlockInputStreamPtr getInputStreamByFormatNameAndBuffer(
+    BlockInputStreamPtr getInputStreamByFormatNameAndBuffer(
         const String & name, ReadBuffer & buf, const Block & sample, UInt64 max_block_size, const ColumnsDescription& columns) const;
 
     /// Don't use streams. Better look at getOutputFormat...
@@ -1071,6 +1079,7 @@ public:
     std::shared_ptr<NamedCnchSession> acquireNamedCnchSession(const UInt64 & txn_id, size_t timeout, bool session_check, bool return_null_if_not_found = false) const;
 
     void initCnchServerResource(const TxnTimestamp & txn_id);
+    void clearCnchServerResource();
     CnchServerResourcePtr getCnchServerResource() const;
     CnchServerResourcePtr tryGetCnchServerResource() const;
     CnchWorkerResourcePtr getCnchWorkerResource() const;
@@ -1152,6 +1161,9 @@ public:
 
     void setIsExplainQuery(const bool & is_explain_query_);
     bool isExplainQuery() const;
+
+    void setAlreadyOutfile(const bool & already_outfile_) { already_outfile = already_outfile_; }
+    bool isAlreadyOutfile() const { return already_outfile; }
 
     SegmentSchedulerPtr getSegmentScheduler();
     SegmentSchedulerPtr getSegmentScheduler() const;
@@ -1244,7 +1256,7 @@ public:
     void setFooterCache(size_t max_size_in_bytes);
 
     /// Create a cache of uncompressed blocks of specified size. This can be done only once.
-    void setUncompressedCache(size_t max_size_in_bytes);
+    void setUncompressedCache(size_t max_size_in_bytes, bool shard_mode = false);
     std::shared_ptr<UncompressedCache> getUncompressedCache() const;
     void dropUncompressedCache() const;
 
@@ -1323,9 +1335,6 @@ public:
 
     /// Call after initialization before using system logs. Call for global context.
     void initializeSystemLogs();
-
-    void initBGPartitionSelector();
-    PartitionSelectorPtr getBGPartitionSelector() const;
 
     /// Call after initialization before using trace collector.
     void initializeTraceCollector();
@@ -1533,7 +1542,7 @@ public:
 
     void clearOptimizerProfile();
 
-    void logOptimizerProfile(Poco::Logger * log, String prefix, String name, String time, bool is_rule = false);
+    void logOptimizerProfile(LoggerPtr log, String prefix, String name, String time, bool is_rule = false);
 
     const String & getTenantId() const
     {
@@ -1571,8 +1580,8 @@ public:
     void setGinIndexFilterResultCache(size_t cache_size_in_bytes);
     GinIdxFilterResultCache* getGinIndexFilterResultCache() const;
 
-    void setGinIndexStoreFactory(const GinIndexStoreCacheSettings & settings_);
-    std::shared_ptr<GinIndexStoreFactory> getGinIndexStoreFactory() const;
+    void setGINStoreReaderFactory(const GINStoreReaderFactorySettings & settings_);
+    std::shared_ptr<GINStoreReaderFactory> getGINStoreReaderFactory() const;
 
     void setPrimaryIndexCache(size_t cache_size_in_bytes);
     std::shared_ptr<PrimaryIndexCache> getPrimaryIndexCache() const;
@@ -1595,6 +1604,9 @@ public:
 
     void setPartCacheManager();
     std::shared_ptr<PartCacheManager> getPartCacheManager() const;
+
+    void setManifestCache();
+    std::shared_ptr<ManifestCache> getManifestCache() const;
 
     /// catalog related
     void initCatalog(const MetastoreConfig & catalog_conf, const String & name_space, bool writable);
@@ -1668,6 +1680,7 @@ public:
     TxnTimestamp getCurrentCnchStartTime() const;
 
     void initCnchBGThreads();
+    UInt32 getEpoch();
     CnchBGThreadsMap * getCnchBGThreadsMap(CnchBGThreadType type) const;
     CnchBGThreadPtr getCnchBGThread(CnchBGThreadType type, const StorageID & storage_id) const;
     CnchBGThreadPtr tryGetCnchBGThread(CnchBGThreadType type, const StorageID & storage_id) const;
@@ -1742,14 +1755,23 @@ public:
     void setPlanCacheManager(std::unique_ptr<PlanCacheManager> && manager);
     PlanCacheManager* getPlanCacheManager();
 
+    bool trySetRunningBackupTask(const String & backup_id);
+    bool hasRunningBackupTask() const;
+    std::optional<String> getRunningBackupTask() const;
+    bool checkRunningBackupTask(const String & backup_id) const;
+    void removeRunningBackupTask(const String & backup_id);
+
     UInt32 getQueryMaxExecutionTime() const;
-    timespec getQueryExpirationTimeStamp() const { return query_expiration_timestamp; }
-    void setQueryExpirationTimeStamp();
+    timespec getQueryExpirationTimeStamp() const;
+    void initQueryExpirationTimeStamp();
 
     AsynchronousReaderPtr getThreadPoolReader() const;
 #if USE_LIBURING
     IOUringReader & getIOUringReader() const;
 #endif
+
+    void initNexusFS(const Poco::Util::AbstractConfiguration & config);
+    NexusFSPtr getNexusFS() const;
 
     void setPreparedStatementManager(std::unique_ptr<PreparedStatementManager> && manager);
     PreparedStatementManager * getPreparedStatementManager();

@@ -16,6 +16,7 @@
 #include <string>
 #include <Interpreters/DistributedStages/PlanSegmentSplitter.h>
 
+#include <Interpreters/DistributedStages/ExchangeMode.h>
 #include <Interpreters/DistributedStages/PlanSegment.h>
 #include <Optimizer/Property/Property.h>
 #include <QueryPlan/ExchangeStep.h>
@@ -24,8 +25,6 @@
 #include <QueryPlan/RemoteExchangeSourceStep.h>
 #include <QueryPlan/TableScanStep.h>
 #include <QueryPlan/ValuesStep.h>
-#include <Storages/Hive/StorageCnchHive.h>
-#include <Storages/StorageCnchMergeTree.h>
 #include <Storages/RemoteFile/IStorageCnchFile.h>
 #include <Storages/StorageCnchMergeTree.h>
 #include <Storages/StorageMemory.h>
@@ -92,6 +91,11 @@ void PlanSegmentSplitter::split(QueryPlan & query_plan, PlanSegmentContext & pla
                         output->setPlanSegmentId(node.plan_segment->getPlanSegmentId());
                         output->setExchangeMode(input->getExchangeMode());
                         output->setParallelSize(node.plan_segment->getParallelSize());
+                        if (isLocalExchange(output->getExchangeMode()))
+                        {
+                            child_node->plan_segment->setHasLocalOutput(true);
+                            node.plan_segment->setHasLocalInput(true);
+                        }
                     }
                 }
                 /**
@@ -393,7 +397,7 @@ PlanSegmentInputs PlanSegmentVisitor::findInputs(QueryPlan::Node * node)
         StoragePtr storage = table_scan_step->getStorage();
         if (storage && storage->isBucketTable() && storage->isTableClustered(plan_segment_context.context))
         {
-            auto num_of_buckets = storage->getInMemoryMetadata().getBucketNumberFromClusterByKey();
+            auto num_of_buckets = storage->getInMemoryMetadataPtr()->getBucketNumberFromClusterByKey();
             input->setNumOfBuckets(num_of_buckets);
         }
         return {input};
@@ -673,7 +677,7 @@ std::vector<size_t> ParallelSizeChecker::visitTableScanNode(QueryPlan::Node * no
 
 std::vector<size_t> ParallelSizeChecker::visitReadStorageRowCountNode(QueryPlan::Node *, const Context &)
 {
-    return {shard_number};
+    return {1};
 }
 
 std::vector<size_t> ParallelSizeChecker::visitRemoteExchangeSourceNode(QueryPlan::Node * node, const Context &)

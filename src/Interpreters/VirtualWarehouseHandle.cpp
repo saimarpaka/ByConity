@@ -56,7 +56,7 @@ VirtualWarehouseHandleImpl::VirtualWarehouseHandleImpl(
     , name(std::move(name_))
     , uuid(uuid_)
     , settings(settings_)
-    , log(&Poco::Logger::get(name + " (VirtualWarehouseHandle)"))
+    , log(getLogger(name + " (VirtualWarehouseHandle)"))
 {
     tryUpdateWorkerGroups(ForceUpdate);
 }
@@ -586,22 +586,6 @@ WorkerGroupHandle VirtualWarehouseHandleImpl::randomWorkerGroup(UpdateMode mode)
     }
 
     throw Exception("No local available worker group for " + name, ErrorCodes::RESOURCE_MANAGER_LOCAL_NO_AVAILABLE_WORKER_GROUP);
-}
-
-std::optional<HostWithPorts> VirtualWarehouseHandleImpl::tryPickWorkerFromRM(VWScheduleAlgo algo, const Requirement & requirement)
-{
-    if (auto rm_client = getContext()->getResourceManagerClient())
-    {
-        try
-        {
-            return rm_client->pickWorker(name, algo, requirement);
-        }
-        catch (const Exception & e)
-        {
-            LOG_ERROR(log, "Failed to pick a worker in vw: {} from RM: {}", name, e.displayText());
-        }
-    }
-    return {};
 }
 
 CnchWorkerClientPtr VirtualWarehouseHandleImpl::pickWorker(const String & worker_group_id, bool skip_busy_worker)

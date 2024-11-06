@@ -13,6 +13,18 @@ AddressInfo getLocalAddress(const Context & query_context)
 
 AddressInfo getRemoteAddress(HostWithPorts host_with_ports, ContextPtr & query_context)
 {
+    if(query_context->getSettingsRef().enable_internal_communication_user)
+    {
+        // Trick for avoiding RBAC performace loss
+        static auto [user, password] = query_context->getCnchInterserverCredentials();
+        return AddressInfo(
+            host_with_ports.host,
+            host_with_ports.tcp_port,
+            user,
+            password,
+            host_with_ports.rpc_port);
+    }
+
     const ClientInfo & info = query_context->getClientInfo();
     return AddressInfo(
         host_with_ports.host,
@@ -20,6 +32,7 @@ AddressInfo getRemoteAddress(HostWithPorts host_with_ports, ContextPtr & query_c
         info.current_user,
         info.current_password,
         host_with_ports.rpc_port);
+
 }
 
 void sendPlanSegmentToAddress(
@@ -31,17 +44,16 @@ void sendPlanSegmentToAddress(
     std::shared_ptr<butil::IOBuf> plan_segment_buf_ptr,
     const WorkerId & worker_id)
 {
-    static auto * log = &Poco::Logger::get("SegmentScheduler::sendPlanSegment");
+    static auto log = getLogger("SegmentScheduler::sendPlanSegment");
     LOG_TRACE(
         log,
-        "query id {} segment id {}, parallel index {}, address {}, plansegment {}",
+        "query id {} segment id {}, parallel index {}, address {}, addtional filters {}, plansegment {}",
         plan_segment_ptr->getQueryId(),
         plan_segment_ptr->getPlanSegmentId(),
         execution_info.parallel_id,
         address_info.toString(),
+        execution_info.source_task_filter.isValid() ? execution_info.source_task_filter.toString() : "Invalid",
         plan_segment_ptr->toString());
-    if (execution_info.source_task_filter.isValid())
-        LOG_TRACE(log, "send additional filter {}", execution_info.source_task_filter.toString());
     execution_info.execution_address = address_info;
 
     {

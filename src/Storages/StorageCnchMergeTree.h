@@ -16,21 +16,24 @@
 #pragma once
 
 #include <optional>
+#include <type_traits>
+#include <Catalog/DataModelPartWrapper_fwd.h>
+#include <CloudServices/CnchPartsHelper.h>
 #include <MergeTreeCommon/CnchStorageCommon.h>
 #include <MergeTreeCommon/MergeTreeMetaBase.h>
 #include <Storages/MergeTree/MergeTreeDataPartType.h>
 #include <Storages/MergeTree/PartitionPruner.h>
-#include <common/shared_ptr_helper.h>
 #include <Storages/StorageSnapshot.h>
-#include <Catalog/DataModelPartWrapper_fwd.h>
-#include <Transaction/TxnTimestamp.h>
 #include <Transaction/CnchLock.h>
+#include <Transaction/TxnTimestamp.h>
+#include <common/shared_ptr_helper.h>
 
 namespace DB
 {
 
 struct PrepareContextResult;
 class ASTSystemQuery;
+class MergeTreeBgTaskStatistics;
 
 class StorageCnchMergeTree final : public shared_ptr_helper<StorageCnchMergeTree>, public MergeTreeMetaBase, public CnchStorageCommonHelper
 {
@@ -43,7 +46,6 @@ public:
     std::string getName() const override { return "Cnch" + merging_params.getModeName() + "MergeTree"; }
 
     void loadMutations();
-    bool supportsParallelInsert() const override { return true; }
     bool supportsSampling() const override { return true; }
     bool supportsFinal() const override { return true; }
     bool supportsPrewhere() const override { return true; }
@@ -53,7 +55,7 @@ public:
     bool supportsTrivialCount() const override { return true; }
     bool supportIntermedicateResultCache() const override
     {
-        return !getInMemoryMetadataPtr()->hasUniqueKey();
+        return true;
     }
 
     /// Whether support DELETE FROM. We only support for Unique MergeTree for now.
@@ -120,6 +122,19 @@ public:
     CheckResults checkData(const ASTPtr & query, ContextPtr local_context) override;
 
     CheckResults autoRemoveData(const ASTPtr & query, ContextPtr local_context) override;
+
+    ServerDataPartsWithDBM
+    getServerDataPartsWithDBMFromSnapshot(const ContextPtr & local_context, std::optional<Strings> partition_ids, UInt64 snapshot_ts) const;
+
+    std::unordered_set<String> getPartitionIDsFromQuery(const ASTs & asts, ContextPtr local_context) const;
+
+    MinimumDataParts getBackupPartsFromDisk(
+        const DiskPtr & backup_disk,
+        const String & parts_path_in_backup,
+        ContextMutablePtr & local_context,
+        std::optional<ASTs> partitions) const;
+
+    void restoreDataFromBackup(BackupTaskPtr & backup_task, const DiskPtr & backup_disk, const String & data_path_in_backup, ContextMutablePtr context, std::optional<ASTs> partitions) override;
 
     /// TODO: some code in this duplicate with filterPartitionByTTL, refine it later
     time_t getTTLForPartition(const MergeTreePartition & partition) const;
@@ -205,14 +220,14 @@ public:
     void sendDropDiskCacheTasks(ContextPtr local_context, const ServerDataPartsVector & parts, bool sync = false, bool drop_vw_disk_cache = false);
     void sendDropManifestDiskCacheTasks(ContextPtr local_context, String version = "", bool sync = false);
 
-    PrunedPartitions getPrunedPartitions(const SelectQueryInfo & query_info, const Names & column_names_to_return, ContextPtr local_context) const ;
+    PrunedPartitions getPrunedPartitions(const SelectQueryInfo & query_info, const Names & column_names_to_return, ContextPtr local_context, const bool & ignore_ttl) const ;
 
     void resetObjectColumns(ContextPtr query_context);
 
     void appendObjectPartialSchema(const TxnTimestamp & txn_id, ObjectPartialSchema partial_schema);
     void resetObjectSchemas(const ObjectAssembledSchema & assembled_schema, const ObjectPartialSchemas & partial_schemas);
     void refreshAssembledSchema(const ObjectAssembledSchema & assembled_schema,  std::vector<TxnTimestamp> txn_ids);
-    void checkColumnsValidity(const ColumnsDescription & columns, const ASTPtr & new_settings = nullptr) const override;
+    void checkMetadataValidity(const ColumnsDescription & columns, const ASTPtr & new_settings = nullptr) const override;
 
     /// parse bucket number set from where clause, only works for single-key cluster by
     std::set<Int64> getRequiredBucketNumbers(const SelectQueryInfo & query_info, ContextPtr context) const;

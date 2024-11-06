@@ -195,7 +195,7 @@ void FutureMergedMutatedPart::updatePath(const MergeTreeMetaBase & storage, cons
 MergeTreeDataMergerMutator::MergeTreeDataMergerMutator(MergeTreeMetaBase & data_, size_t background_pool_size_)
     : data(data_)
     , background_pool_size(background_pool_size_)
-    , log(&Poco::Logger::get(data.getLogName() + " (MergerMutator)"))
+    , log(getLogger(data.getLogName() + " (MergerMutator)"))
 {
 }
 
@@ -613,7 +613,7 @@ SelectPartsDecision MergeTreeDataMergerMutator::selectPartsToMergeMulti(
             if (!(0 < max_rows && max_rows <= std::numeric_limits<UInt32>::max()))
                 max_rows = std::numeric_limits<UInt32>::max();
         }
-        merge_selector = std::make_unique<DanceMergeSelector>(data, merge_settings);
+        merge_selector = std::make_unique<DanceMergeSelector>(merge_settings);
     }
     else
     {
@@ -2055,7 +2055,7 @@ void MergeTreeDataMergerMutator::splitMutationCommands(
 NameSet MergeTreeDataMergerMutator::collectFilesForClearMapKey(MergeTreeData::DataPartPtr source_part, const MutationCommands & commands)
 {
     NameSet clear_map_key_set;
-    const auto & metadata_snapshot = source_part->storage.getInMemoryMetadata();
+    auto metadata_snapshot = source_part->storage.getInMemoryMetadataPtr();
     for (const auto & command : commands)
     {
         if (command.type != MutationCommand::Type::CLEAR_MAP_KEY)
@@ -2066,7 +2066,7 @@ NameSet MergeTreeDataMergerMutator::collectFilesForClearMapKey(MergeTreeData::Da
         NameSet file_set;
 
         String map_name = command.column_name;
-        const auto & map_column = metadata_snapshot.columns.getPhysical(map_name);
+        const auto & map_column = metadata_snapshot->getColumns().getPhysical(map_name);
         const auto & map_type = typeid_cast<const DataTypeMap &>(*map_column.type);
         /// Remove all files of the implicit key name
         for (const auto & map_key_ast : command.map_keys->children)

@@ -31,7 +31,6 @@ namespace DB::ResourceManagement
 {
 VirtualWarehouse::VirtualWarehouse(String n, UUID u, const VirtualWarehouseSettings & s) : name(std::move(n)), uuid(u), settings(s)
 {
-    query_scheduler = std::make_unique<QueryScheduler>(*this);
 }
 
 void VirtualWarehouse::applySettings(const VirtualWarehouseAlterSettings & setting_changes, const Catalog::CatalogPtr & catalog)
@@ -89,7 +88,7 @@ void VirtualWarehouse::applySettings(const VirtualWarehouseAlterSettings & setti
     if (setting_changes.cooldown_seconds_after_scaledown)
         new_settings.cooldown_seconds_after_scaledown = *setting_changes.cooldown_seconds_after_scaledown;
 
-    LOG_TRACE(&Poco::Logger::get("VirtualWarehouse"), "update settings alter type {}", setting_changes.queue_alter_type);
+    LOG_TRACE(getLogger("VirtualWarehouse"), "update settings alter type {}", setting_changes.queue_alter_type);
     if (setting_changes.queue_alter_type == Protos::QueueAlterType::ADD_RULE)
     {
         if (!setting_changes.queue_data)
@@ -489,7 +488,7 @@ QueryQueueInfo VirtualWarehouse::getAggQueueInfo()
         if (it->second.last_sync < timeout_threshold)
         {
             LOG_DEBUG(
-                &Poco::Logger::get("VirtualWarehouse"),
+                getLogger("VirtualWarehouse"),
                 "Removing outdated server sync from {}, last synced {}",
                 it->first,
                 std::to_string(it->second.last_sync));

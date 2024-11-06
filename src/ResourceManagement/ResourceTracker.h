@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Core/BackgroundSchedulePool.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/Context_fwd.h>
@@ -36,7 +37,7 @@ class ResourceManagerController;
 class ResourceTracker : public boost::noncopyable
 {
 public:
-    ResourceTracker(ResourceManagerController & rm_controller_);
+    explicit ResourceTracker(ResourceManagerController & rm_controller_);
     ~ResourceTracker();
 
     std::vector<WorkerNodePtr> loadWorkerNode(const String & vw_name, const std::vector<WorkerNodeCatalogData> & data);
@@ -55,7 +56,7 @@ private:
     void clearLostWorkers();
 
     ResourceManagerController & rm_controller;
-    Poco::Logger * log;
+    LoggerPtr log;
     /// Use bthread::Mutex but not std::mutex to avoid deadlock issue as this lock may lock other rpc API (catalog) in the lock scope.
     bthread::Mutex node_mutex;
     std::unordered_map<std::string, WorkerNodePtr> worker_nodes;

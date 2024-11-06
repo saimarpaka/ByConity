@@ -221,5 +221,4 @@ void assertCompatibleHeader(const Block & actual, const Block & desired, const s
 void getBlocksDifference(const Block & lhs, const Block & rhs, std::string & out_lhs_diff, std::string & out_rhs_diff);
 
 Block concatenateBlocks(const std::vector<Block> & blocks);
-
 }

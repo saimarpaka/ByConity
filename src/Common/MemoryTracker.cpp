@@ -26,7 +26,6 @@
 #include <Common/Exception.h>
 #include <Common/formatReadable.h>
 #include <common/logger_useful.h>
-#include <Common/ProfileEvents.h>
 #include <Common/thread_local_rng.h>
 
 #include <atomic>
@@ -117,9 +116,9 @@ MemoryTracker total_memory_tracker(nullptr, VariableContext::Global);
 
 
 MemoryTracker::MemoryTracker(VariableContext level_)
-    : parent(&total_memory_tracker), log(&Poco::Logger::get("MemoryTracker")), level(level_) {}
+    : parent(&total_memory_tracker), log(getLogger("MemoryTracker")), level(level_) {}
 MemoryTracker::MemoryTracker(MemoryTracker * parent_, VariableContext level_)
-    : parent(parent_), log(&Poco::Logger::get("MemoryTracker")), level(level_) {}
+    : parent(parent_), log(getLogger("MemoryTracker")), level(level_) {}
 
 
 MemoryTracker::~MemoryTracker()
@@ -136,7 +135,6 @@ MemoryTracker::~MemoryTracker()
         }
     }
 }
-
 
 void MemoryTracker::logPeakMemoryUsage() const
 {
@@ -211,7 +209,7 @@ void MemoryTracker::allocImpl(Int64 size, bool throw_if_memory_exceeded)
 #endif
 
     std::bernoulli_distribution fault(fault_probability);
-    if (unlikely(fault_probability && fault(thread_local_rng)) && memoryTrackerCanThrow(level, true) && throw_if_memory_exceeded)
+    if (unlikely(fault_probability && fault(thread_local_rng)) && throw_if_memory_exceeded && memoryTrackerCanThrow(level, true))
     {
         ProfileEvents::increment(ProfileEvents::QueryMemoryLimitExceeded);
         amount.fetch_sub(size, std::memory_order_relaxed);
@@ -250,7 +248,7 @@ void MemoryTracker::allocImpl(Int64 size, bool throw_if_memory_exceeded)
         DB::TraceCollector::collect(DB::TraceType::MemorySample, StackTrace(), size);
     }
 
-    if (unlikely(current_hard_limit && will_be > current_hard_limit) && memoryTrackerCanThrow(level, false) && throw_if_memory_exceeded)
+    if (unlikely(current_hard_limit && will_be > current_hard_limit) && throw_if_memory_exceeded && memoryTrackerCanThrow(level, false))
     {
         /// Prevent recursion. Exception::ctor -> std::string -> new[] -> MemoryTracker::alloc
         BlockerInThread untrack_lock(VariableContext::Global);
@@ -414,3 +412,22 @@ bool canEnqueueBackgroundTask()
     auto amount = background_memory_tracker.get();
     return limit == 0 || amount < limit;
 }
+
+void MemoryTracker::adjustWithUntrackedMemory(Int64 untracked_memory)
+{
+    if (untracked_memory > 0)
+        allocImpl(untracked_memory, /*throw_if_memory_exceeded*/ false);
+    else
+        free(-untracked_memory);
+}
+
+void MemoryTracker::setParent(MemoryTracker * elem)
+{
+    /// Untracked memory shouldn't be accounted to a query or a user if it was allocated before the thread was attached
+    /// to a query thread group or a user group, because this memory will be (🤞) freed outside of these scopes.
+    if (level == VariableContext::Thread && DB::current_thread)
+        DB::current_thread->flushUntrackedMemory();
+
+    parent.store(elem, std::memory_order_relaxed);
+}
+

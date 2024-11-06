@@ -88,7 +88,7 @@ PartCacheManager::PartCacheManager(ContextMutablePtr context_, const size_t memo
     size_t size_of_cached_storage = getContext()->getConfigRef().getUInt("cnch_max_cached_storage", 10000);
     size_t data_cache_min_lifetime = getContext()->getConfigRef().getUInt("data_cache_min_lifetime", 1800);
     LOG_DEBUG(
-        &Poco::Logger::get("PartCacheManager"),
+        getLogger("PartCacheManager"),
         "Memory limit is {} bytes, Part cache size is {},  delete bitmap size is {}, storage cache size is {} (in unit).",
         memory_limit,
         size_of_cached_parts,
@@ -178,7 +178,7 @@ void PartCacheManager::mayUpdateTableMeta(const IStorage & storage, const PairIn
             // No need to load from catalog in dummy mode.
             if (likely(!dummy_mode))
             {
-                getContext()->getCnchCatalog()->getPartitionsFromMetastore(*cnch_table, meta_ptr->partitions);
+                getContext()->getCnchCatalog()->getPartitionsFromMetastore(*cnch_table, meta_ptr->partitions, meta_ptr->lock_holder);
                 getContext()->getCnchCatalog()->getTableClusterStatus(storage.getStorageUUID(), meta_ptr->is_clustered);
                 getContext()->getCnchCatalog()->getTablePreallocateVW(storage.getStorageUUID(), meta_ptr->preallocate_vw);
                 meta_loaded = true;
@@ -193,7 +193,7 @@ void PartCacheManager::mayUpdateTableMeta(const IStorage & storage, const PairIn
         catch (...)
         {
             /// Handle bytekv exceptions and make sure next time will retry
-            tryLogCurrentException(&Poco::Logger::get("PartCacheManager::mayUpdateTableMeta"));
+            tryLogCurrentException(getLogger("PartCacheManager::mayUpdateTableMeta"));
             meta_ptr->cache_status = CacheStatus::UINIT;
             throw;
         }
@@ -231,7 +231,7 @@ void PartCacheManager::mayUpdateTableMeta(const IStorage & storage, const PairIn
                     nullptr,
                     on_table_creation);
                 /// insert the new meta lock into lock container.
-                meta_lock_container.emplace(uuid, meta_ptr->meta_mutex);
+                meta_lock_container.emplace(uuid, meta_ptr->lock_holder);
             }
             meta_ptr->server_vw_name = server_vw_name;
             active_tables.emplace(uuid, meta_ptr);
@@ -253,7 +253,7 @@ void PartCacheManager::mayUpdateTableMeta(const IStorage & storage, const PairIn
                 {
                     it->second->cache_status = CacheStatus::UINIT;
                     meta_ptr = it->second;
-                    LOG_DEBUG(&Poco::Logger::get("PartCacheManager::MetaEntry"), "Invalid part cache because of cache version mismatch for table {}.{}", meta_ptr->database, meta_ptr->table);
+                    LOG_DEBUG(getLogger("PartCacheManager::MetaEntry"), "Invalid part cache because of cache version mismatch for table {}.{}", meta_ptr->database, meta_ptr->table);
                 }
             }
         }
@@ -278,7 +278,7 @@ void PartCacheManager::mayUpdateTableMeta(const IStorage & storage, const PairIn
             /// Does not interfere with the primary logic.
             catch (...)
             {
-                tryLogCurrentException(&Poco::Logger::get("PartCacheManager::mayUpdateTableMeta"));
+                tryLogCurrentException(getLogger("PartCacheManager::mayUpdateTableMeta"));
             }
         }
     }
@@ -320,7 +320,7 @@ bool PartCacheManager::checkIfCacheValidWithNHUT(const UUID & uuid, const UInt64
         /// try invalid the part cache if the cached nhut is old enough;
         if (table_entry->need_invalid_cache && getContext()->getPhysicalTimestamp() - table_entry->cached_non_host_update_ts > 9000)
         {
-            LOG_DEBUG(&Poco::Logger::get("PartCacheManager::getTableMeta"), "invalid part cache for {}. NHUT is {}", UUIDHelpers::UUIDToString(uuid), table_entry->cached_non_host_update_ts);
+            LOG_DEBUG(getLogger("PartCacheManager::getTableMeta"), "invalid part cache for {}. NHUT is {}", UUIDHelpers::UUIDToString(uuid), table_entry->cached_non_host_update_ts);
             invalidPartAndDeleteBitmapCache(uuid);
         }
 
@@ -349,7 +349,7 @@ TableMetaEntryPtr PartCacheManager::getTableMeta(const UUID & uuid)
     std::unique_lock<std::mutex> lock(cache_mutex);
     if (active_tables.find(uuid) == active_tables.end())
     {
-        LOG_TRACE(&Poco::Logger::get("PartCacheManager::getTableMeta"), "Table id {} not found in active_tables", UUIDHelpers::UUIDToString(uuid));
+        LOG_TRACE(getLogger("PartCacheManager::getTableMeta"), "Table id {} not found in active_tables", UUIDHelpers::UUIDToString(uuid));
         return nullptr;
     }
 
@@ -456,6 +456,33 @@ bool PartCacheManager::getPartsInfoMetrics(
     const IStorage & i_storage, std::unordered_map<String, PartitionFullPtr> & partitions, bool require_partition_info)
 {
     return table_partition_metrics.getPartsInfoMetrics(i_storage, partitions, require_partition_info);
+}
+
+std::pair<Int64, Int64> PartCacheManager::getTotalAndMaxPartsNumber(const IStorage & storage)
+{
+    Int64 total_parts{0};
+    Int64 max_parts_in_partition{0};
+
+    TableMetaEntryPtr table_entry = getTableMeta(storage.getStorageUUID());
+    if (table_entry)
+    {
+        auto & table_partitions = table_entry->partitions;
+        for (auto it = table_partitions.begin(); it != table_partitions.end(); it++)
+        {
+            PartitionFullPtr partition_ptr = std::make_shared<CnchPartitionInfoFull>(*it);
+            const auto & partition_data = partition_ptr->partition_info_ptr->metrics_ptr->read();
+            bool is_validate = partition_data.validateMetrics();
+            if (!is_validate)
+            {
+                throw Exception(ErrorCodes::INCORRECT_DATA, "Parts info in PartCacheManager is not available now");
+            }
+
+            total_parts += partition_data.total_parts_number;
+            max_parts_in_partition = std::max(max_parts_in_partition, partition_data.total_parts_number);
+        }
+    }
+
+    return {total_parts, max_parts_in_partition};
 }
 
 Catalog::PartitionMap PartCacheManager::updatePartitionGCTime(const StoragePtr table, const Strings & partitions, UInt32 ts)
@@ -579,7 +606,7 @@ void PartCacheManager::invalidCacheWithNewTopology(const CnchServerTopology & to
         auto server = topology.getTargetServer(UUIDHelpers::UUIDToString(it->first), it->second->server_vw_name);
         if (!isLocalServer(server.getRPCAddress(), rpc_port))
         {
-            LOG_DEBUG(&Poco::Logger::get("PartCacheManager::invalidCacheWithNewTopology"), "Dropping part cache of {}", UUIDHelpers::UUIDToString(it->first));
+            LOG_DEBUG(getLogger("PartCacheManager::invalidCacheWithNewTopology"), "Dropping part cache of {}", UUIDHelpers::UUIDToString(it->first));
             part_cache_ptr->dropCache(it->first);
             delete_bitmap_cache_ptr->dropCache(it->first);
             storageCachePtr->remove(it->second->database, it->second->table);
@@ -640,7 +667,7 @@ void PartCacheManager::invalidPartCacheWithoutLock(
             }
         }
     }
-    LOG_DEBUG(&Poco::Logger::get("PartCacheManager::invalidPartCacheWithoutLock"), "Dropping part cache of {}", UUIDHelpers::UUIDToString(uuid));
+    LOG_DEBUG(getLogger("PartCacheManager::invalidPartCacheWithoutLock"), "Dropping part cache of {}", UUIDHelpers::UUIDToString(uuid));
     if (!skip_part_cache)
         part_cache_ptr->dropCache(uuid);
     if (!skip_delete_bitmap_cache)
@@ -760,7 +787,7 @@ void PartCacheManager::invalidDeleteBitmapCache(const UUID & uuid, const DeleteB
     invalidDataCache<DeleteBitmapMetaPtrVector, DeleteBitmapAdapter>(uuid, parts);
 }
 
-template <typename Adapter, typename InputValueVec, typename ValueVec, typename CachePtr, typename CacheValueMap, typename GetKeyFunc>
+template <typename Adapter, typename InputValueVec, typename ValueVec, typename CachePtr, typename CacheValueMap, typename GetKeyFunc, bool insert_into_cache>
 void PartCacheManager::insertDataIntoCache(
     const IStorage & table,
     const InputValueVec & parts_model,
@@ -852,11 +879,18 @@ void PartCacheManager::insertDataIntoCache(
                           .emplace(
                               partition_id,
                               std::make_shared<CnchPartitionInfo>(
-                                  UUIDHelpers::UUIDToString(uuid), partitionid_to_partition[partition_id], partition_id, true))
+                                  UUIDHelpers::UUIDToString(uuid),
+                                  partitionid_to_partition[partition_id],
+                                  partition_id,
+                                  meta_ptr->lock_holder->getPartitionLock(partition_id),
+                                  true))
                           .first;
             meta_partitions.emplace(partition_id, *it);
         }
     }
+
+    if (!insert_into_cache)
+        return;
 
     for (auto & [partition_id, data_wrapper_vector] : partitionid_to_data_list)
     {
@@ -1023,7 +1057,7 @@ void PartCacheManager::loadActiveTables()
     auto tables_meta = getContext()->getCnchCatalog()->getAllTables();
     if (tables_meta.empty())
         return;
-    LOG_DEBUG(&Poco::Logger::get("PartCacheManager"), "Reloading {} active tables.", tables_meta.size());
+    LOG_DEBUG(getLogger("PartCacheManager"), "Reloading {} active tables.", tables_meta.size());
 
     auto rpc_port = getContext()->getRPCPort();
     for (auto & table_meta : tables_meta)
@@ -1068,7 +1102,7 @@ static const size_t LOG_PARTS_SIZE = 100000;
 static void logPartsVector(const MergeTreeMetaBase & storage, const ServerDataPartsVector & res)
 {
     if (unlikely(res.size() % LOG_PARTS_SIZE == 0))
-        LOG_DEBUG(&Poco::Logger::get("PartCacheManager"), "{} getting parts and now loaded {} parts in memory", storage.getStorageID().getNameForLogs(), res.size());
+        LOG_DEBUG(getLogger("PartCacheManager"), "{} getting parts and now loaded {} parts in memory", storage.getStorageID().getNameForLogs(), res.size());
 }
 */
 
@@ -1195,7 +1229,7 @@ RetValueVec PartCacheManager::getDataInternal(
         }
 
         LOG_DEBUG(
-            &Poco::Logger::get("PartCacheManager"),
+            getLogger("PartCacheManager"),
             "Waiting for loading parts for table {} use {} threads.",
             storage.getStorageID().getNameForLogs(),
             max_threads);
@@ -1393,7 +1427,7 @@ template <
             static_assert(DependentFalse<CachePtr>::value, "invalid template type for CachePtr");
         }
 
-        LOG_DEBUG(&Poco::Logger::get("PartCacheManager"), "Get {} by partitions for table : {}", type, storage.getLogName());
+        LOG_DEBUG(getLogger("PartCacheManager"), "Get {} by partitions for table : {}", type, storage.getLogName());
         Stopwatch watch;
         UUID uuid = storage.getStorageUUID();
 
@@ -1530,7 +1564,7 @@ template <
                                 lock, std::chrono::milliseconds(5000), [&cache_status]() { return cache_status->isLoaded(); }))
                         {
                             LOG_TRACE(
-                                &Poco::Logger::get("PartCacheManager"),
+                                getLogger("PartCacheManager"),
                                 "Wait timeout 5000ms for other thread loading table: {}, partition: {}",
                                 storage.getStorageID().getNameForLogs(),
                                 partition_id);
@@ -1593,7 +1627,7 @@ template <
             }
 
             LOG_DEBUG(
-                &Poco::Logger::get("PartCacheManager"),
+                getLogger("PartCacheManager"),
                 "Waiting for loading parts for table {} use {} threads.",
                 storage.getStorageID().getNameForLogs(),
                 max_threads);
@@ -1694,7 +1728,7 @@ std::unordered_map<String, std::pair<size_t, size_t>> PartCacheManager::getTable
 
 void PartCacheManager::reset()
 {
-    LOG_DEBUG(&Poco::Logger::get("PartCacheManager::reset"), "Resetting part cache manager.");
+    LOG_DEBUG(getLogger("PartCacheManager::reset"), "Resetting part cache manager.");
     std::unique_lock<std::mutex> lock(cache_mutex);
     {
         /// 1. Remember the current size of the active_tables.
@@ -1758,15 +1792,17 @@ size_t PartCacheManager::cleanTrashedActiveTables() {
 
 void PartCacheManager::shutDown()
 {
-    LOG_DEBUG(&Poco::Logger::get("PartCacheManager::shutdown"), "Shutdown method of part cache manager called.");
+    LOG_DEBUG(getLogger("PartCacheManager::shutdown"), "Shutdown method of part cache manager called.");
     table_partition_metrics.shutDown(this);
     active_table_loader->deactivate();
     meta_lock_cleaner->deactivate();
     trashed_active_tables_cleaner->deactivate();
 }
 
-StoragePtr PartCacheManager::getStorageFromCache(const UUID & uuid, const PairInt64 & topology_version)
+StoragePtr PartCacheManager::getStorageFromCache(const UUID & uuid, const PairInt64 & topology_version, const Context & query_context)
 {
+    if (query_context.hasSessionTimeZone())
+        return nullptr;
     StoragePtr res;
     TableMetaEntryPtr table_entry = getTableMeta(uuid);
     if (table_entry && topology_version == table_entry->cache_version.get())
@@ -1774,8 +1810,10 @@ StoragePtr PartCacheManager::getStorageFromCache(const UUID & uuid, const PairIn
     return res;
 }
 
-void PartCacheManager::insertStorageCache(const StorageID & storage_id, const StoragePtr storage, const UInt64 commit_ts, const PairInt64 & topology_version)
+void PartCacheManager::insertStorageCache(const StorageID & storage_id, const StoragePtr storage, const UInt64 commit_ts, const PairInt64 & topology_version, const Context & query_context)
 {
+    if (query_context.hasSessionTimeZone())
+        return;
     TableMetaEntryPtr table_entry = getTableMeta(storage_id.uuid);
     // reject insert old version storage into cache
     if (storage && storage->latest_version > commit_ts)
@@ -1821,7 +1859,7 @@ bool PartCacheManager::forceRecalculate(StoragePtr table)
 
     const auto host_port = getContext()->getCnchTopologyMaster()->getTargetServer(
         UUIDHelpers::UUIDToString(table->getStorageUUID()), table->getServerVwName(), true);
-    auto * log = &Poco::Logger::get("PartCacheManager::forceRecalculate");
+    auto log = getLogger("PartCacheManager::forceRecalculate");
     if (!host_port.empty() && !isLocalServer(host_port.getRPCAddress(), std::to_string(getContext()->getRPCPort())))
     {
         try
@@ -1897,36 +1935,33 @@ PartCacheManager::getLastModificationTimeHints(const ConstStoragePtr & storage, 
             };
         }
 
-        auto & meta_partitions = table_meta->partitions;
+        const auto * meta_storage = dynamic_cast<const StorageCnchMergeTree *>(storage.get());
+        auto meta_partitions = table_meta->getPartitionList();
+
+        // Skip if it passes TTL
+        meta_storage->filterPartitionByTTL(meta_partitions, now);
+
         ret.reserve(meta_partitions.size());
         for (auto it = meta_partitions.begin(); it != meta_partitions.end(); it++)
         {
-            Protos::LastModificationTimeHint hint = Protos::LastModificationTimeHint{};
+            auto partition_info = table_meta->getPartitionInfo((*it)->getID(*meta_storage));
+            if (!partition_info)
+                continue;
 
-            const auto * meta_storage = dynamic_cast<const StorageCnchMergeTree *>(storage.get());
+            Protos::LastModificationTimeHint hint = Protos::LastModificationTimeHint{};
             if (!meta_storage)
                 throw Exception("Table is not a Meta Based MergeTree", ErrorCodes::UNKNOWN_TABLE);
-            String partition;
-            {
-                WriteBufferFromString write_buffer(partition);
-                (*it)->partition_ptr->store(*meta_storage, write_buffer);
-            }
 
-            // Skip if it passes TTL
-            auto ttl = meta_storage->getTTLForPartition(*(*it)->partition_ptr);
 
-            if (ttl && ttl < now) {
-                continue;
-            }
-
+            String partition = partition_info->getPartitionValue(*meta_storage);
             hint.set_partition_id(partition);
 
-            std::optional<std::pair<PartitionMetrics::PartitionMetricsStore, bool>> data = load_func(*it);
+            std::optional<std::pair<PartitionMetrics::PartitionMetricsStore, bool>> data = load_func(partition_info);
 
             if (!data.has_value() || (data->first.total_parts_number < 0 || data->first.total_rows_count < 0))
             {
                 LOG_WARNING(
-                    &Poco::Logger::get("PartCacheManager::getLastModificationTimeHints"),
+                    getLogger("PartCacheManager::getLastModificationTimeHints"),
                     "Can not get partition metrics for partition {} from snapshots.",
                     partition);
                 hint.set_last_modification_time(0);
@@ -2091,5 +2126,18 @@ void PartCacheManager::insertDataPartsIntoCache(
         DataPartModelsMap,
         std::function<String(const DataModelPartWrapperPtr &)>>(
         table, parts_model, is_merged_parts, should_update_metrics, topology_version, part_cache_ptr, dataPartGetKeyFunc, nullptr);
+}
+
+void PartCacheManager::insertStagedPartsIntoCache(
+    const IStorage & table, const pb::RepeatedPtrField<Protos::DataModelPart> & parts_model, const PairInt64 & topology_version)
+{
+    insertDataIntoCache<
+        ServerDataPartAdapter,
+        pb::RepeatedPtrField<Protos::DataModelPart>,
+        DataModelPartWrapperVector,
+        CnchDataPartCachePtr,
+        DataPartModelsMap,
+        std::function<String(const DataModelPartWrapperPtr &)>, false>(
+        table, parts_model, false, false, topology_version, part_cache_ptr, dataPartGetKeyFunc, nullptr);
 }
 }

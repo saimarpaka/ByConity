@@ -160,11 +160,11 @@ public:
 
     std::string dumpStructure() const;
 
-    const OwnerInfo & getOwnerInfo() const;
-    void setOwnerInfo(OwnerInfo owner_info_);
-
     void append(const Chunk & chunk);
     void append(const Chunk & chunk, size_t from, size_t length); // append rows [from, from+length) of chunk
+
+    const OwnerInfo & getOwnerInfo() const;
+    void setOwnerInfo(OwnerInfo owner_info_);
 
 private:
     Columns columns;
@@ -198,5 +198,8 @@ private:
     /// It could contain less columns and rows then related block.
     RowsMaskByColumnId rows_mask_by_column_id;
 };
+
+/// Creates a chunk with the same columns but makes them constants with a default value and a specified number of rows.
+Chunk cloneConstWithDefault(const Chunk & chunk, size_t num_rows);
 
 }

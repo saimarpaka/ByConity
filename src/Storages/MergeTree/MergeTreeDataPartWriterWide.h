@@ -20,6 +20,7 @@
  */
 
 #pragma once
+#include <Common/Logger.h>
 #include <Storages/IndexFile/IndexFileWriter.h>
 #include <Storages/MergeTree/MergeTreeDataPartWriterOnDisk.h>
 
@@ -88,19 +89,27 @@ private:
 
     size_t getRowsWrittenInLastMark() override { return rows_written_in_last_mark; }
 
-    Poco::Logger * getLogger() override { return log; }
+    LoggerPtr getLogger() override { return log; }
 
     /// How many rows we have already written in the current mark.
     /// More than zero when incoming blocks are smaller then their granularity.
     size_t rows_written_in_last_mark = 0;
 
-    Poco::Logger * log;
+    LoggerPtr log;
 
     /** ------------------ Unique Table Only --------------------- **/
     void writeUniqueKeyIndex(Block & unique_key_block);
     void writeToTempUniqueKeyIndex(Block & block, size_t first_rid, rocksdb::DB & temp_index);
     void closeTempUniqueKeyIndex();
     void writeFinalUniqueKeyIndexFile(IndexFile::IndexFileInfo & file_info);
+
+    void finishDeleteFlagSerialization(MergeTreeData::DataPart::Checksums & checksums, bool sync);
+    void finishUpdateColumnsSerialization(MergeTreeData::DataPart::Checksums & checksums, bool sync);
+    void finishDedupSortSerialization(MergeTreeData::DataPart::Checksums & checksums, bool sync);
+
+    ColumnPtr delete_flag;
+    ColumnPtr update_columns;
+    ColumnPtr dedup_sort;
 
     size_t rows_count = 0;
 

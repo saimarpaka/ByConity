@@ -419,7 +419,20 @@ SetPtr makeExplicitSet(
 
         const auto *const arg_type_ptr = typeid_cast<const DataTypeArray *>(left_arg_type.get());
         if (arg_type_ptr)
+        {
             left_arg_type = arg_type_ptr->getNestedType();
+            if (left_arg_type->getTypeId() == TypeIndex::Nothing) // Just make an empty set for empty array like arraySetCheck([], (1,2))
+            {
+                DataTypes set_element_types = {left_arg_type};
+                auto set_key = PreparedSetKey::forLiteral(*right_arg, set_element_types);
+                if (prepared_sets.count(set_key))
+                    return prepared_sets.at(set_key); /// Already prepared.
+                Block block;
+                SetPtr empty_set = std::make_shared<Set>(size_limits, create_ordered_set, context->getSettingsRef().transform_null_in);
+                prepared_sets[set_key] = empty_set;
+                return empty_set;
+            }
+        }
         else
             throw Exception("Invalid argument of function arraySet related functions", ErrorCodes::LOGICAL_ERROR);
     }
@@ -1039,6 +1052,7 @@ void ActionsMatcher::visit(const ASTFunction & node, const ASTPtr & ast, Data & 
         if (make_set)
         {
             // check if current column type really has bitmap index
+            bool has_valid_identifier = false;
             for (size_t i = 0; i < arg_size; i += 2)
             {
                 ASTPtr arg_col = node.arguments->children.at(i);
@@ -1052,9 +1066,11 @@ void ActionsMatcher::visit(const ASTFunction & node, const ASTPtr & ast, Data & 
                             should_update_bitmap_index_info = false;
                             break;
                         }
+                        has_valid_identifier = true;
                     }
                 }
             }
+            should_update_bitmap_index_info &= has_valid_identifier;
 
             auto col_name = node.getColumnName();
             if (should_update_bitmap_index_info)
@@ -1446,7 +1462,7 @@ SetPtr ActionsMatcher::tryMakeSet(const ASTFunction & node, Data & data, bool no
         if (BitmapIndexHelper::isNarrowArraySetFunctions(node.name))
             throw;
 
-        LOG_DEBUG(&Poco::Logger::get("ActionsMatcher"), "Cannot make set for bitmap_index_funcs, fallback to normal reader");
+        LOG_DEBUG(getLogger("ActionsMatcher"), "Cannot make set for bitmap_index_funcs, fallback to normal reader");
         return nullptr;
     }
     return return_set;

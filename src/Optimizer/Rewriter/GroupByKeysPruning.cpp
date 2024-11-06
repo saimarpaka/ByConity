@@ -17,13 +17,14 @@
 
 namespace DB
 {
-void GroupByKeysPruning::rewrite(QueryPlan & plan, ContextMutablePtr context) const
+bool GroupByKeysPruning::rewrite(QueryPlan & plan, ContextMutablePtr context) const
 {
     GroupByKeysPruning::Rewriter rewriter{context, plan.getCTEInfo()};
     Void v;
     auto result = VisitorUtil::accept(plan.getPlanNode(), rewriter, v);
 
     plan.update(result.plan);
+    return true;
 }
 
 PlanAndDataDependencyWithConstants GroupByKeysPruning::Rewriter::visitPlanNode(PlanNodeBase & node, Void &)
@@ -91,7 +92,7 @@ PlanAndDataDependencyWithConstants GroupByKeysPruning::Rewriter::visitAggregatin
         std::string str;
         for (const auto & name : simplified_agg_keys)
             str += name + ",";
-        LOG_INFO(&Poco::Logger::get("DataDependency"), "after GroupByKeysPruning by functional dependecy, new_agg_keys -- " + str + ". note we don't remove unused keys, but just add it to keys_not_hashed");
+        LOG_INFO(getLogger("DataDependency"), "after GroupByKeysPruning by functional dependecy, new_agg_keys -- " + str + ". note we don't remove unused keys, but just add it to keys_not_hashed");
     }
 
     auto node_ptr = node.shared_from_this();
@@ -136,7 +137,7 @@ PlanAndDataDependencyWithConstants GroupByKeysPruning::Rewriter::visitAggregatin
             std::string str;
             for (const auto & name : new_agg_keys)
                 str += name + ",";
-            LOG_INFO(&Poco::Logger::get("DataDependency"), "after GroupByKeysPruning by constants, new_agg_keys -- " + str);
+            LOG_INFO(getLogger("DataDependency"), "after GroupByKeysPruning by constants, new_agg_keys -- " + str);
         }
     }
 

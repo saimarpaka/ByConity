@@ -14,6 +14,7 @@
  */
 
 #pragma once
+#include <Common/Logger.h>
 #include <Interpreters/DistributedStages/PlanSegmentSplitter.h>
 #include <Interpreters/IInterpreter.h>
 #include <Interpreters/QueryLog.h>
@@ -65,7 +66,7 @@ public:
     std::pair<PlanSegmentTreePtr, std::set<StorageID>> getPlanSegment();
     QueryPlanPtr getPlanFromCache(UInt128 query_hash);
     bool addPlanToCache(UInt128 query_hash, QueryPlanPtr & plan, AnalysisPtr analysis);
-    static void setPlanSegmentInfoForExplainAnalyze(PlanSegmentTreePtr & plan_segment_tree);
+    static void setPlanSegmentInfoForExplainAnalyze(PlanSegmentTreePtr & plan_segment_tree, ContextMutablePtr context);
     BlockIO readFromQueryCache(ContextPtr local_context, QueryCacheContext & can_use_query_cache);
 
     BlockIO execute() override;
@@ -98,7 +99,7 @@ private:
     CTEInfo cte_info;
     ContextMutablePtr context;
     SelectQueryOptions options;
-    Poco::Logger * log;
+    LoggerPtr log;
     bool interpret_sub_query;
     PlanSegmentTreePtr plan_segment_tree_ptr;
 

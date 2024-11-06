@@ -45,7 +45,7 @@ public:
     bool supportsPrewhere() const override { return getNested()->supportsPrewhere(); }
     bool supportsReplication() const override { return getNested()->supportsReplication(); }
     bool supportsMapImplicitColumn() const override { return getNested()->supportsMapImplicitColumn(); }
-    bool supportsParallelInsert() const override { return getNested()->supportsParallelInsert(); }
+    bool supportsParallelInsert(ContextPtr local_context) const override { return getNested()->supportsParallelInsert(local_context); }
     bool supportsDeduplication() const override { return getNested()->supportsDeduplication(); }
     bool noPushingToViews() const override { return getNested()->noPushingToViews(); }
     bool hasEvenlyDistributedRead() const override { return getNested()->hasEvenlyDistributedRead(); }
@@ -118,7 +118,7 @@ public:
     void alter(const AlterCommands & params, ContextPtr context, TableLockHolder & alter_lock_holder) override
     {
         getNested()->alter(params, context, alter_lock_holder);
-        IStorage::setInMemoryMetadata(getNested()->getInMemoryMetadata());
+        IStorage::setInMemoryMetadata(getNested()->getInMemoryMetadataCopy());
     }
 
     void checkAlterIsPossible(const AlterCommands & commands, ContextPtr context) const override

@@ -26,6 +26,8 @@
 #include <Databases/IDatabase.h>
 #include <Databases/DatabaseMemory.h>
 #include <Databases/DatabaseOnDisk.h>
+#include <Common/StringUtils/StringUtils.h>
+#include <common/types.h>
 #include <Common/quoteString.h>
 #include <Storages/StorageMemory.h>
 #include <Storages/LiveView/TemporaryLiveViewCleaner.h>
@@ -302,18 +304,6 @@ DatabaseAndTable DatabaseCatalog::getTableImpl(
         }
     }
 
-    auto aeolus_check = [&table_id, &context_](const StoragePtr & storage)
-    {
-        // check aeolus table access before return required storage.
-        if (context_->getServerType() != ServerType::cnch_server)
-            return;
-
-        if (!storage || storage->getName() == "MaterializedView")
-            return;
-
-        context_->checkAeolusTableAccess(table_id.database_name, table_id.table_name);
-    };
-
     if (table_id.hasUUID() && table_id.database_name == TEMPORARY_DATABASE)
     {
         /// Shortcut for tables which have persistent UUID
@@ -343,7 +333,6 @@ DatabaseAndTable DatabaseCatalog::getTableImpl(
         }
 #endif
 
-        aeolus_check(db_and_table.second);
         return db_and_table;
     }
 
@@ -373,11 +362,11 @@ DatabaseAndTable DatabaseCatalog::getTableImpl(
         if (databases.end() == it)
         {
             if (exception)
-                exception->emplace(
-                    ErrorCodes::UNKNOWN_DATABASE,
-                    "Database {} doesn't exist when fetching {}",
-                    backQuoteIfNeed(table_id.getDatabaseName()),
-                    table_id.getNameForLogs());
+               exception->emplace(
+                   ErrorCodes::UNKNOWN_DATABASE,
+                   "Database {} doesn't exist when fetching {}",
+                   backQuoteIfNeed(table_id.getDatabaseName()),
+                   table_id.getNameForLogs());
             return {};
         }
         database = it->second;
@@ -405,7 +394,6 @@ DatabaseAndTable DatabaseCatalog::getTableImpl(
             cnch_table->resetObjectColumns(context_);
     }
 
-    aeolus_check(table);
     return {database, table};
 }
 
@@ -636,14 +624,7 @@ bool DatabaseCatalog::isTableExist(const DB::StorageID & table_id, ContextPtr co
     if (table_id.hasUUID())
         return tryGetByUUID(table_id.uuid, context_).second != nullptr;
 
-    DatabasePtr db;
-    {
-        String tenant_db = formatTenantDatabaseName(table_id.database_name);
-        std::lock_guard lock{databases_mutex};
-        auto iter = databases.find(tenant_db);
-        if (iter != databases.end())
-            db = iter->second;
-    }
+    DatabasePtr db = tryGetDatabase(table_id.getDatabaseName(), context_);
     return db && db->isTableExist(table_id.table_name, context_);
 }
 
@@ -740,7 +721,7 @@ std::unique_ptr<DatabaseCatalog> DatabaseCatalog::database_catalog;
 DatabaseCatalog::DatabaseCatalog(ContextMutablePtr global_context_)
     : WithMutableContext(global_context_)
     , view_dependencies("DatabaseCatalog")
-    , log(&Poco::Logger::get("DatabaseCatalog"))
+    , log(getLogger("DatabaseCatalog"))
     , use_cnch_catalog{global_context_->getServerType() == ServerType::cnch_server}
 {
     TemporaryLiveViewCleaner::init(global_context_);
@@ -795,7 +776,7 @@ DatabasePtr DatabaseCatalog::getDatabase(const String & database_name, ContextPt
 
     if (preferCnchCatalog(*local_context))
     {
-        DatabasePtr res = tryGetDatabaseCnch(database_name, local_context);
+        DatabasePtr res = tryGetDatabaseCnch(resolved_database, local_context);
         if (res)
             return res;
     }

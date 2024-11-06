@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <CloudServices/CnchWorkerClient.h>
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/VirtualWarehouseQueue.h>
@@ -133,7 +134,6 @@ public:
         );
     WorkerGroupHandle pickLocally(const VWScheduleAlgo & algo, const Requirement & requirement = {});
     WorkerGroupHandle randomWorkerGroup(UpdateMode mode = TryUpdate);
-    std::optional<HostWithPorts> tryPickWorkerFromRM(VWScheduleAlgo algo, const Requirement & requirement = {});
     void updateWorkerStatusFromRM(const std::vector<WorkerGroupData> & groups_data);
     void updateWorkerStatusFromPSM(const IServiceDiscovery::WorkerGroupMap & groups_data, const std::string & vw_name);
 
@@ -176,7 +176,7 @@ private:
     const String name;
     const UUID uuid;
     VirtualWarehouseSettings settings;
-    Poco::Logger * log;
+    LoggerPtr log;
 
     /// In ByteHouse, a VW will be auto recycled (auto-suspend) if no new queries received for a period (5 minutes by default).
     /// And when user send queries to the VW again, ByteYard will make sure to send out the queries after workers are full ready.

@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Optimizer/JoinGraph.h>
 #include <Optimizer/MaterializedView/MaterializedViewStructure.h>
 #include <Optimizer/MaterializedView/PartitionConsistencyChecker.h>
@@ -37,14 +38,18 @@ public:
     String name() const override { return "MaterializedViewRewriter"; }
 
 private:
-    void rewrite(QueryPlan & plan, ContextMutablePtr context) const override;
+    bool rewrite(QueryPlan & plan, ContextMutablePtr context) const override;
+
+    bool rewriteImpl(QueryPlan & plan, ContextMutablePtr context) const;
+
     bool isEnabled(ContextMutablePtr context) const override
     {
         return context->getSettingsRef().enable_materialized_view_rewrite || context->getSettingsRef().enable_view_based_query_rewrite;
     }
+
     LinkedHashMap<MaterializedViewStructurePtr, PartitionCheckResult>
     getRelatedMaterializedViews(QueryPlan & plan, ContextMutablePtr context) const;
 
-    Poco::Logger * log = &Poco::Logger::get("MaterializedViewRewriter");
+    LoggerPtr log = getLogger("MaterializedViewRewriter");
 };
 }

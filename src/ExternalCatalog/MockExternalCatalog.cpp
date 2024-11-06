@@ -33,7 +33,7 @@ StoragePtr createStorageFromCreateQuery([[maybe_unused]] const String & catalog,
         {},
         {},false);
     ret->setCreateTableSql(create_table_query);
-    LOG_DEBUG(&Poco::Logger::get("createStorageFromCreateQuery"), "create table from {} ", create_table_query);
+    LOG_DEBUG(getLogger("createStorageFromCreateQuery"), "create table from {} ", create_table_query);
     return ret;
 }
 
@@ -57,7 +57,7 @@ DB::StoragePtr MockExternalCatalog::getTable(
             "created mock table {}.{} {}",
             storage_ptr->getStorageID().database_name,
             storage_ptr->getStorageID().table_name,
-            storage_ptr->getInMemoryMetadata().getColumns().toString()));
+            storage_ptr->getInMemoryMetadataPtr()->getColumns().toString()));
     return storage_ptr;
 }
 

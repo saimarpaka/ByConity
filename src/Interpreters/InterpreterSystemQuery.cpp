@@ -261,7 +261,7 @@ void InterpreterSystemQuery::startStopAction(StorageActionBlockType action_type,
 
 
 InterpreterSystemQuery::InterpreterSystemQuery(const ASTPtr & query_ptr_, ContextMutablePtr context_)
-        : WithMutableContext(context_), query_ptr(query_ptr_->clone()), log(&Poco::Logger::get("InterpreterSystemQuery"))
+        : WithMutableContext(context_), query_ptr(query_ptr_->clone()), log(getLogger("InterpreterSystemQuery"))
 {
 }
 
@@ -585,6 +585,9 @@ BlockIO InterpreterSystemQuery::executeCnchCommand(ASTSystemQuery & query, Conte
             break;
         case Type::RELEASE_MEMORY_LOCK:
             releaseMemoryLock(query, table_id, system_context);
+            break;
+        case Type::TRIGGER_HDFS_CONFIG_UPDATE:
+            triggerHDFSConfigUpdate();
             break;
         default:
             throw Exception(ErrorCodes::NOT_IMPLEMENTED, "System command {} is not supported in CNCH", ASTSystemQuery::typeToString(query.type));
@@ -1275,7 +1278,7 @@ void InterpreterSystemQuery::executeCheckpoint(const ASTSystemQuery & )
     auto local_context = getContext();
     if (auto server_type = local_context->getServerType(); server_type != ServerType::cnch_server)
         throw Exception("SYSTEM CHECKPOINT is only available on CNCH server", ErrorCodes::NOT_IMPLEMENTED);
-    
+
     auto storage = DatabaseCatalog::instance().getTable(table_id, local_context);
     CnchManifestCheckpointThread checkpoint_thread(local_context, storage->getStorageID());
     checkpoint_thread.executeManually();
@@ -1654,7 +1657,7 @@ namespace
 {
 
 template<typename T>
-void executeActionOnCNCHLogImpl(std::shared_ptr<T> cnch_log, ASTSystemQuery::Type type, const String & table_name , Poco::Logger * log)
+void executeActionOnCNCHLogImpl(std::shared_ptr<T> cnch_log, ASTSystemQuery::Type type, const String & table_name , LoggerPtr log)
 {
     using Type = ASTSystemQuery::Type;
     if (cnch_log)
@@ -1842,4 +1845,9 @@ void InterpreterSystemQuery::releaseMemoryLock(const ASTSystemQuery & query, con
     }
 }
 
+void InterpreterSystemQuery::triggerHDFSConfigUpdate()
+{
+    // only for internal use
+    // HDFSConfigManager::instance().updateAll(true);
+}
 }

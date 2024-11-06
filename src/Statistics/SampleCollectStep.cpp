@@ -86,7 +86,7 @@ public:
 
         // to estimate ndv
         LOG_INFO(
-            &Poco::Logger::get("FirstSampleColumnHandler"),
+            getLogger("FirstSampleColumnHandler"),
             fmt::format(
                 FMT_STRING("col info: col={} && "
                            "sqls={}"),
@@ -147,7 +147,7 @@ public:
             auto estimated_ndv_upper_bound = scaleNdv(full_count, sample_row_count, sample_ndv_ub, block_ndv);
 
             LOG_INFO(
-                &Poco::Logger::get("ThirdSampleColumnHandler"),
+                getLogger("ThirdSampleColumnHandler"),
                 fmt::format(
                     FMT_STRING("estimated_ndv={}, estimated_ndv_low_bound={}, estimated_ndv_upper_bound={}"),
                     estimated_ndv,
@@ -209,7 +209,7 @@ public:
             }
 
             LOG_INFO(
-                &Poco::Logger::get("FirstSampleColumnHandler"),
+                getLogger("FirstSampleColumnHandler"),
                 fmt::format(
                     FMT_STRING("col info: col={} && "
                                "context raw data: full_count={}, sample_row_count={} && "
@@ -454,8 +454,9 @@ public:
 
         sql += sample_tail_with_space;
 
-        auto helper = SubqueryHelper::create(context, sql, true);
-        auto block = getOnlyRowFrom(helper);
+        auto query_context = SubqueryHelper::createQueryContext(context);
+        auto block = executeSubQueryWithOneRow(sql, query_context, false, false);
+
         table_handler.parse(block);
     }
 
@@ -497,8 +498,9 @@ public:
             auto sql = table_handler.getFullSql();
             sql += getSampleTail(false);
 
-            auto helper = SubqueryHelper::create(context, sql, true);
-            auto block = getOnlyRowFrom(helper);
+            auto query_context = SubqueryHelper::createQueryContext(context);
+            auto block = executeSubQueryWithOneRow(sql, query_context, false, false);
+
             table_handler.parse(block);
         }
 
@@ -513,9 +515,7 @@ public:
         {
             auto & col_data = handler_context.columns_data.at(col_desc.name);
             auto full_sql = constructThirdSql(handler_context.settings, table_info, col_desc, col_data.bucket_bounds, getSampleTail(true));
-            LOG_INFO(&Poco::Logger::get("thirdSampleColumnHandler"), full_sql);
-            auto helper = SubqueryHelper::create(context, full_sql, true);
-            Block block;
+            LOG_INFO(getLogger("thirdSampleColumnHandler"), full_sql);
 
             // when bucket_bounds not exists, we will use 0 as bucket_id
             // so there are always 1 buckets
@@ -523,16 +523,9 @@ public:
             std::vector<double> sample_ndvs(num_buckets);
             std::vector<double> sample_block_ndvs(num_buckets);
             std::vector<double> sample_counts(num_buckets);
-            auto full_count = handler_context.full_count;
             auto sample_null_count = 0;
 
-            while ((block = helper.getNextBlock()))
-            {
-                if (block.rows() == 0)
-                {
-                    continue;
-                }
-
+            auto proc_block = [num_buckets, &sample_ndvs, &sample_block_ndvs, &sample_counts, &sample_null_count](Block & block) {
                 // tag is bucket index
                 auto col_tag = block.getByPosition(0).column;
                 auto nested_col_tag = getNestedColumn(col_tag);
@@ -557,8 +550,10 @@ public:
                     sample_block_ndvs[tag] = nested_col_block_ndv->getUInt(index);
                     sample_counts[tag] = nested_col_count->getUInt(index);
                 }
-            }
+            };
 
+            auto query_context = SubqueryHelper::createQueryContext(context);
+            executeSubQuery(full_sql, query_context, proc_block);
 
             auto sample_nonnull_count = std::accumulate(sample_counts.begin(), sample_counts.end(), 0.0);
             auto sample_row_count = sample_nonnull_count + sample_null_count;
@@ -570,6 +565,7 @@ public:
             // dirty hack this by assign full_count to sample_row_count when this case occurs
 
             /// TODO: remove this hack when snapshot is ready
+            auto full_count = handler_context.full_count;
             if (full_count < sample_row_count)
             {
                 handler_context.full_count = sample_row_count;

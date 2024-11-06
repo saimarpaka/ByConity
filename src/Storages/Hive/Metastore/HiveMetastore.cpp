@@ -7,9 +7,9 @@
 #if USE_HIVE
 
 #include <hive_metastore_types.h>
-#include "Access/KerberosInit.h"
-#include "Storages/Hive/CnchHiveSettings.h"
-#include "Storages/Hive/TSaslClientTransport.h"
+#include <Access/KerberosInit.h>
+#include <Storages/Hive/CnchHiveSettings.h>
+#include <Storages/Hive/TSaslClientTransport.h>
 
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <thrift/transport/TBufferTransports.h>
@@ -35,7 +35,7 @@ static const int hive_metastore_client_recv_timeout_ms = 10000;
 static const int hive_metastore_client_send_timeout_ms = 10000;
 
 ThriftHiveMetastoreClientPool::ThriftHiveMetastoreClientPool(ThriftHiveMetastoreClientBuilder builder_)
-    : PoolBase<Object>(max_hive_metastore_client_connections, &Poco::Logger::get("ThriftHiveMetastoreClientPool")), builder(builder_)
+    : PoolBase<Object>(max_hive_metastore_client_connections, getLogger("ThriftHiveMetastoreClientPool")), builder(builder_)
 {
 }
 
@@ -66,11 +66,24 @@ void HiveMetastoreClient::tryCallHiveClient(std::function<void(ThriftHiveMetasto
         throw Exception(ErrorCodes::NO_HIVEMETASTORE, "Hive Metastore expired because {}", err_msg);
 }
 
+void HiveMetastoreClient::getConfigValue(std::string & value, const std::string & name, const std::string & defaultValue)
+{
+    tryCallHiveClient([&](auto & client) { client->get_config_value(value, name, defaultValue); });
+}
+
 Strings HiveMetastoreClient::getAllDatabases()
 {
     Strings databases;
     tryCallHiveClient([&](auto & client) { client->get_all_databases(databases); });
     return databases;
+}
+
+std::shared_ptr<ApacheHive::Database> HiveMetastoreClient::getDatabase(const String & db_name)
+{
+    auto database = std::make_shared<Apache::Hadoop::Hive::Database>();
+    auto client_call = [&](auto & client) { client->get_database(*database, db_name); };
+    tryCallHiveClient(client_call);
+    return database;
 }
 
 Strings HiveMetastoreClient::getAllTables(const String & db_name)
@@ -220,14 +233,17 @@ HiveMetastoreClientFactory & HiveMetastoreClientFactory::instance()
 
 HiveMetastoreClientPtr HiveMetastoreClientFactory::getOrCreate(const String & name, const std::shared_ptr<CnchHiveSettings> & settings)
 {
+    auto settings_hash =  std::hash<std::string>{}(settings->toString());
+    auto key = name + "#" + std::to_string(settings_hash);
     std::lock_guard lock(mutex);
-    auto it = clients.find(name);
+    auto it = clients.find(key);
+
     if (it == clients.end())
     {
         auto builder = [name, settings]() { return createThriftHiveMetastoreClient(name, settings); };
 
         auto client = std::make_shared<HiveMetastoreClient>(builder);
-        clients.emplace(name, client);
+        clients.emplace(key, client);
         return client;
     }
 
@@ -270,6 +286,7 @@ HiveMetastoreClientFactory::createThriftHiveMetastoreClient(const String & name,
     {
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "connect to hive metastore: {} failed. {}", name, tx.what());
     }
+
     return thrift_client;
 }
 } // namespace DB

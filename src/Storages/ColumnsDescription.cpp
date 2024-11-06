@@ -56,6 +56,7 @@
 #include <Interpreters/TreeRewriter.h>
 #include <Interpreters/ExpressionActions.h>
 
+#include <fmt/format.h>
 
 namespace DB
 {
@@ -787,6 +788,14 @@ std::optional<ColumnDefault> ColumnsDescription::getDefault(const String & colum
     return {};
 }
 
+ColumnsDescription::ColumnOnUpdates ColumnsDescription::getOnUpdates() const
+{
+    ColumnOnUpdates ret;
+    for (const auto & col : columns)
+        if (col.on_update_expression)
+            ret.emplace(col.name, col.on_update_expression);
+    return ret;
+}
 
 bool ColumnsDescription::hasCompressionCodec(const String & column_name) const
 {
@@ -931,4 +940,22 @@ bool ColumnsDescription::isBitEngineKeyStringColumn(const String & column_name) 
     return false;
 }
 
+String ColumnsDescription::toDebugString() const
+{
+    WriteBufferFromOwnString buf;
+
+    DB::writeText(columns.size(), buf);
+    writeCString(" columns:\n", buf);
+
+    for (const ColumnDescription & column : columns)
+        column.writeText(buf);
+
+    DB::writeText(subcolumns.size(), buf);
+    writeCString(" subcolumns:\n", buf);
+
+    for (const auto & subcolumn : subcolumns)
+        writeString(fmt::format("{} {}\n", subcolumn.name, subcolumn.type->getName()), buf);
+
+    return buf.str();
+}
 }

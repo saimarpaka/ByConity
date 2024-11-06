@@ -20,6 +20,7 @@
  */
 
 #pragma once
+#include <Common/Logger.h>
 #include "config_formats.h"
 #if USE_PARQUET
 
@@ -102,6 +103,8 @@ private:
     size_t getNumberOfRowGroups() override;
 
     std::optional<PendingChunk> readBatch(size_t row_group_idx) override;
+
+    size_t getRowCount() override;
 
     void prefetchRowGroup(size_t row_group_idx) override;
 
@@ -234,7 +237,7 @@ private:
     PrewhereInfoPtr prewhere_info;
     std::shared_ptr<ArrowFieldIndexUtil> field_util;
 
-    Poco::Logger * log {&Poco::Logger::get("ParquetBlockInputFormat")};
+    LoggerPtr log {getLogger("ParquetBlockInputFormat")};
 };
 
 class ParquetSchemaReader : public ISchemaReader

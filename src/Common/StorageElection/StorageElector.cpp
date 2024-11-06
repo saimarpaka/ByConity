@@ -39,7 +39,7 @@ StorageElector::StorageElector(
     , election_key(election_key_)
     , on_leader(std::move(on_leader_))
     , on_follower(std::move(on_follower_))
-    , logger(&Poco::Logger::get("StorageElector"))
+    , logger(getLogger("StorageElector"))
 {
     local_info.refresh_interval_ms = refresh_interval_ms;
     local_info.expired_interval_ms = expired_interval_ms;
@@ -304,8 +304,8 @@ void StorageElector::tryUpdateRemoteRecord(bool refreshed, bool yield)
                 "It is updated successfully and not expired: time cost : {}ms, {}",
                 getCurrentTimeMs() - now,
                 new_leader_info.DebugString());
-        else
-            LOG_TRACE(logger, "It is refreshed successfully and not expired: {}", new_leader_info.DebugString());
+        // else
+            // LOG_TRACE(logger, "It is refreshed successfully and not expired: {}", new_leader_info.DebugString());
     }
     else
     {

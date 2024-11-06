@@ -47,7 +47,7 @@
 #include <QueryPlan/PlanPrinter.h>
 #include <QueryPlan/QueryPlan.h>
 #include <QueryPlan/QueryPlanner.h>
-#include <Storages/Hive/StorageCnchHive.h>
+#include <Storages/DataLakes/StorageCnchLakeBase.h>
 #include <Storages/RemoteFile/IStorageCnchFile.h>
 #include <Storages/StorageCnchMergeTree.h>
 #include <Storages/StorageDistributed.h>
@@ -134,7 +134,7 @@ InterpreterSelectQueryUseOptimizer::InterpreterSelectQueryUseOptimizer(
     , cte_info(std::move(cte_info_))
     , context(context_)
     , options(options_)
-    , log(&Poco::Logger::get("InterpreterSelectQueryUseOptimizer"))
+    , log(getLogger("InterpreterSelectQueryUseOptimizer"))
 {
     interpret_sub_query = !!sub_plan_ptr;
 }
@@ -282,7 +282,7 @@ std::pair<PlanSegmentTreePtr, std::set<StorageID>> InterpreterSelectQueryUseOpti
     ProfileEvents::increment(ProfileEvents::PlanSegmentSplitterTime, stage_watch.elapsedMilliseconds());
 
     resetFinalSampleSize(plan_segment_tree);
-    setPlanSegmentInfoForExplainAnalyze(plan_segment_tree);
+    setPlanSegmentInfoForExplainAnalyze(plan_segment_tree, context);
     GraphvizPrinter::printPlanSegment(plan_segment_tree, context);
     context->logOptimizerProfile(
         log, "Optimizer total run time: ", "Optimizer Total", std::to_string(total_watch.elapsedMillisecondsAsDouble()) + "ms");
@@ -298,7 +298,7 @@ std::pair<PlanSegmentTreePtr, std::set<StorageID>> InterpreterSelectQueryUseOpti
     return std::make_pair(std::move(plan_segment_tree), std::move(used_storage_ids));
 }
 
-QueryPipeline executeTEALimit(QueryPipeline & pipeline, ContextMutablePtr context, ASTPtr query_ptr, Poco::Logger * log)
+QueryPipeline executeTEALimit(QueryPipeline & pipeline, ContextMutablePtr context, ASTPtr query_ptr, LoggerPtr log)
 {
     const ASTSelectWithUnionQuery & ast = query_ptr->as<ASTSelectWithUnionQuery &>();
 
@@ -587,8 +587,15 @@ BlockIO InterpreterSelectQueryUseOptimizer::execute()
     return res;
 }
 
-void InterpreterSelectQueryUseOptimizer::setPlanSegmentInfoForExplainAnalyze(PlanSegmentTreePtr & plan_segment_tree)
+void InterpreterSelectQueryUseOptimizer::setPlanSegmentInfoForExplainAnalyze(PlanSegmentTreePtr & plan_segment_tree, ContextMutablePtr context)
 {
+    if (context->getSettingsRef().log_explain_analyze_type == LogExplainAnalyzeType::QUERY_PIPELINE
+        || context->getSettingsRef().log_explain_analyze_type == LogExplainAnalyzeType::AGGREGATED_QUERY_PIPELINE)
+    {
+        context->setSetting("report_segment_profiles", true);
+        for (auto & segment_node : plan_segment_tree->getNodes())
+            segment_node.plan_segment->setProfileType(ReportProfileType::QueryPipeline);
+    }
     auto * final_segment = plan_segment_tree->getRoot()->getPlanSegment();
     if (final_segment->getQueryPlan().getRoot())
     {
@@ -624,6 +631,9 @@ void InterpreterSelectQueryUseOptimizer::fillContextQueryAccessInfo(ContextPtr c
         {
             Names required_columns;
             auto storage_id = storage_analysis.storage->getStorageID();
+            // check aeolus access
+            if (context->getServerType() == ServerType::cnch_server)
+                context->checkAeolusTableAccess(storage_id.database_name, storage_id.table_name);
             if (auto it = used_columns_map.find(storage_analysis.storage->getStorageID()); it != used_columns_map.end())
             {
                 for (const auto & column : it->second)
@@ -654,8 +664,6 @@ void InterpreterSelectQueryUseOptimizer::setUnsupportedSettings(ContextMutablePt
         return;
 
     SettingsChanges setting_changes;
-    setting_changes.emplace_back("distributed_aggregation_memory_efficient", false);
-
     context->applySettingsChanges(setting_changes);
 }
 
@@ -832,10 +840,10 @@ std::optional<PlanSegmentContext> ClusterInfoFinder::visitTableScanNode(TableSca
 {
     auto source_step = node.getStep();
     const auto * cnch_table = dynamic_cast<StorageCnchMergeTree *>(source_step->getStorage().get());
-    const auto * cnch_hive = dynamic_cast<StorageCnchHive *>(source_step->getStorage().get());
+    const auto * cnch_lake = dynamic_cast<StorageCnchLakeBase *>(source_step->getStorage().get());
     const auto * cnch_file = dynamic_cast<IStorageCnchFile *>(source_step->getStorage().get());
 
-    if (cnch_table || cnch_hive || cnch_file)
+    if (cnch_table || cnch_lake || cnch_file)
     {
         const auto & worker_group = cluster_info_context.context->getCurrentWorkerGroup();
         auto worker_group_status_ptr = cluster_info_context.context->getWorkerGroupStatusPtr();
@@ -864,10 +872,10 @@ std::optional<PlanSegmentContext> ClusterInfoFinder::visitTableWriteNode(TableWr
     auto source_step = node.getStep();
     auto storage = source_step->getTarget()->getStorage();
     const auto * cnch_table = dynamic_cast<StorageCnchMergeTree *>(storage.get());
-    const auto * cnch_hive = dynamic_cast<StorageCnchHive *>(storage.get());
+    const auto * cnch_lake = dynamic_cast<StorageCnchLakeBase *>(storage.get());
     const auto * cnch_file = dynamic_cast<IStorageCnchFile *>(storage.get());
 
-    if (cnch_table || cnch_hive || cnch_file)
+    if (cnch_table || cnch_lake || cnch_file)
     {
         const auto & worker_group = cluster_info_context.context->getCurrentWorkerGroup();
         auto worker_group_status_ptr = cluster_info_context.context->getWorkerGroupStatusPtr();

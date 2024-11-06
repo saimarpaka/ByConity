@@ -29,6 +29,7 @@ public:
         ORC,
         HUDI,
         InputSplit,
+        Paimon,
     };
     static FileFormat fromHdfsInputFormatClass(const String & class_name);
     static FileFormat fromFormatName(const String & format_name);
@@ -50,8 +51,6 @@ public:
     FileFormat getFormat() const { return format; }
     String getFormatName() const;
     std::unique_ptr<ReadBufferFromFileBase> readFile(const ReadSettings & settings = {}) const;
-
-    virtual std::optional<size_t> numRows() { return {}; }
 
     // todo @caoliu impl this seconds
     UInt64 getLastModifiedTimestamp() { return 0; }

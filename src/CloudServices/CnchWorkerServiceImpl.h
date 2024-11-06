@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Interpreters/Context_fwd.h>
 #include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH.h>
@@ -127,6 +128,12 @@ public:
         Protos::DropDedupWorkerResp * response,
         google::protobuf::Closure * done) override;
 
+    void sendBackupCopyTask(
+        google::protobuf::RpcController *,
+        const Protos::SendBackupCopyTaskReq * request,
+        Protos::SendBackupCopyTaskResp * response,
+        google::protobuf::Closure * done) override;
+
     void getDedupWorkerStatus(
         google::protobuf::RpcController *,
         const Protos::GetDedupWorkerStatusReq * request,
@@ -227,13 +234,22 @@ public:
         Protos::SendOffloadingResp * response,
         google::protobuf::Closure * done) override;
 
+    void broadcastManifest(
+        google::protobuf::RpcController * cntl,
+        const Protos::BroadcastManifestReq * request,
+        Protos::BroadcastManifestResp * response,
+        google::protobuf::Closure * done) override;
+
 private:
-    Poco::Logger * log;
+    LoggerPtr log;
 
     // class PreloadHandler;
     // std::shared_ptr<PreloadHandler> preload_handler;
 
     ThreadPool thread_pool;
+
+    std::mutex backup_lock;
+    std::unique_ptr<ThreadPool> backup_rpc_pool;
 };
 
 REGISTER_SERVICE_IMPL(CnchWorkerServiceImpl);

@@ -23,6 +23,7 @@
 #include <Common/Stopwatch.h>
 #include <Common/ThreadPool.h>
 #include <common/defines.h>
+#include <pdqsort.h>
 
 namespace DB
 {
@@ -213,7 +214,7 @@ namespace
             return;
         }
 
-        std::sort(all_items.begin(), all_items.end(), Comparator{});
+        pdqsort(all_items.begin(), all_items.end(), Comparator{});
 
         auto prev_it = all_items.begin();
         auto curr_it = std::next(prev_it);
@@ -358,7 +359,7 @@ namespace
 
         auto process_parts = [&](Vec & parts, size_t begin_pos, size_t end_pos, Vec & visible_parts_)
         {
-            std::sort(parts.begin() + begin_pos, parts.begin() + end_pos, PartComparator<Part>{});
+            pdqsort(parts.begin() + begin_pos, parts.begin() + end_pos, PartComparator<Part>{});
 
             /// One-pass algorithm to construct delta chains
             auto prev_it = parts.begin() + begin_pos;
@@ -488,9 +489,9 @@ namespace
         if (!partition_sorted || !partition_aligned)
         {
             if (!partition_sorted)
-                LOG_WARNING(&Poco::Logger::get(__func__), "parts are not partition sorted, this could make calcVisible slow");
+                LOG_WARNING(getLogger(__func__), "parts are not partition sorted, this could make calcVisible slow");
             else if (partition_ids.size() > 1)
-                LOG_WARNING(&Poco::Logger::get(__func__), "parts are not partition aligned, this could make calcVisible slow");
+                LOG_WARNING(getLogger(__func__), "parts are not partition aligned, this could make calcVisible slow");
             process_parts(all_parts, 0, all_parts.size(), visible_parts);
         }
         else
@@ -530,7 +531,7 @@ namespace
 
         if (logging == EnableLogging)
         {
-            auto log = &Poco::Logger::get(__func__);
+            auto log = getLogger(__func__);
             LOG_DEBUG(log, "all_parts:\n {}", partsToDebugString(all_parts));
             LOG_DEBUG(log, "visible_parts (skip_drop_ranges={}):\n{}", skip_drop_ranges, partsToDebugString(visible_parts));
             if (visible_alone_drop_ranges)
@@ -557,6 +558,11 @@ ServerDataPartsVector calcVisibleParts(ServerDataPartsVector & all_parts, bool f
 MergeTreeDataPartsCNCHVector calcVisibleParts(MergeTreeDataPartsCNCHVector & all_parts, bool flatten, LoggingOption logging)
 {
     return calcVisiblePartsImpl<MergeTreeDataPartsCNCHVector>(all_parts, flatten, /* skip_drop_ranges */ true, nullptr, nullptr, logging);
+}
+
+MinimumDataParts calcVisibleParts(MinimumDataParts & all_parts, bool flatten, LoggingOption logging)
+{
+    return calcVisiblePartsImpl<MinimumDataParts>(all_parts, flatten, /* skip_drop_ranges */ true, nullptr, nullptr, logging);
 }
 
 IMergeTreeDataPartsVector calcVisibleParts(IMergeTreeDataPartsVector& all_parts,
@@ -668,7 +674,7 @@ void calcVisibleDeleteBitmaps(
         return;
     }
 
-    std::sort(all_bitmaps.begin(), all_bitmaps.end(), LessDeleteBitmapMeta());
+    pdqsort(all_bitmaps.begin(), all_bitmaps.end(), LessDeleteBitmapMeta());
 
     auto prev_it = all_bitmaps.begin();
     auto curr_it = std::next(prev_it);

@@ -39,7 +39,7 @@ struct DumpedData
     MutableMergeTreeDataPartsCNCHVector staged_parts;
     CnchDedupHelper::DedupMode dedup_mode = CnchDedupHelper::DedupMode::APPEND;
 
-    bool isEmpty();
+    bool isEmpty() const;
     void extend(DumpedData && data);
 };
 
@@ -96,13 +96,38 @@ public:
         res.dedup_mode = dedup_mode;
     }
 
+    CnchDedupHelper::DedupMode getDedupMode() const
+    {
+        return dedup_mode;
+    }
+
+    bool isNeedDedupStage() const { return dedup_mode != CnchDedupHelper::DedupMode::APPEND; }
+
+    void setFromAttach() { from_attach = true; }
+
     DumpedData res;
+
+    static UUID newPartID(const MergeTreePartInfo& part_info, UInt64 txn_timestamp)
+    {
+        UUID random_id = UUIDHelpers::generateV4();
+        UInt64& random_id_low = UUIDHelpers::getHighBytes(random_id);
+        UInt64& random_id_high = UUIDHelpers::getLowBytes(random_id);
+        boost::hash_combine(random_id_low, part_info.min_block);
+        boost::hash_combine(random_id_high, part_info.max_block);
+        boost::hash_combine(random_id_low, part_info.mutation);
+        boost::hash_combine(random_id_high, txn_timestamp);
+        return random_id;
+    }
 
 private:
     MergeTreeMetaBase & storage;
     ContextPtr context;
     ManipulationType type;
     String task_id;
+
+    /// ATTACH path should be distingushed from INSERT;
+    /// but we now record all new parts in INSERT, here we add this field as a mark
+    bool from_attach{false};
 
     String consumer_group;
     cppkafka::TopicPartitionList tpl;
@@ -119,8 +144,6 @@ private:
     UInt64 peak_memory_usage;
 
     CnchDedupHelper::DedupMode dedup_mode = CnchDedupHelper::DedupMode::APPEND;
-
-    UUID newPartID(const MergeTreePartInfo& part_info, UInt64 txn_timestamp);
 };
 
 }

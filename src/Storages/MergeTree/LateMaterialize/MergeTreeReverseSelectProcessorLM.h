@@ -1,4 +1,5 @@
 #pragma once
+#include <Common/Logger.h>
 #include <DataStreams/IBlockInputStream.h>
 #include <Storages/MergeTree/LateMaterialize/MergeTreeSelectProcessorLM.h>
 #include <Storages/MergeTree/MergeTreeData.h>
@@ -18,7 +19,8 @@ class MergeTreeReverseSelectProcessorLM : public MergeTreeSelectProcessorLM
 public:
     template<typename... Args>
     explicit MergeTreeReverseSelectProcessorLM(Args &&... args)
-        : MergeTreeSelectProcessorLM{std::forward<Args>(args)...}
+        : MergeTreeSelectProcessorLM{std::forward<Args>(args)...},
+        is_first_task(true)
     {
         LOG_TRACE(log, "Reading {} ranges in reverse order from part {}, approx. {} rows starting from {}",
             part_detail.ranges.size(), part_detail.data_part->name, total_rows,
@@ -35,8 +37,9 @@ protected:
     Chunk readFromPart() override;
 
 private:
+    bool is_first_task;
     Chunks chunks;
-    static inline Poco::Logger * log = &Poco::Logger::get("MergeTreeReverseSelectProcessor");
+    static inline LoggerPtr log = getLogger("MergeTreeReverseSelectProcessor");
 };
 
 }

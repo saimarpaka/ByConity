@@ -165,7 +165,7 @@ MySQLHandler::MySQLHandler(IServer & server_, TCPServer & tcp_server_, const Poc
     : Poco::Net::TCPServerConnection(socket_)
     , server(server_)
     , tcp_server(tcp_server_)
-    , log(&Poco::Logger::get("MySQLHandler"))
+    , log(getRawLogger("MySQLHandler"))
     , connection_id(connection_id_)
     , connection_context(Context::createCopy(server.context()))
     , auth_plugin(new MySQLProtocol::Authentication::Native41())
@@ -221,6 +221,7 @@ MySQLHandler::MySQLHandler(IServer & server_, TCPServer & tcp_server_, const Poc
     settings_replacements.emplace_back("NET_WRITE_TIMEOUT", "send_timeout");
     settings_replacements.emplace_back("NET_READ_TIMEOUT", "receive_timeout");
     settings_replacements.emplace_back("CHARACTER SET utf8", "SQL_CHARSET='utf8mb4'");
+    settings_replacements.emplace_back("SESSION TRANSACTION READ ONLY", "SQL_TXN_READ_ONLY=1");
     settings_replacements.emplace_back("AUTOCOMMIT", "SQL_AUTOCOMMIT");
     settings_replacements.emplace_back("PROFILING", "SQL_PROFILING");
 }
@@ -290,9 +291,9 @@ void MySQLHandler::run()
             SettingsChanges setting_changes;
             setting_changes.emplace_back("dialect_type", String("MYSQL"));
             connection_context->applySettingsChanges(setting_changes);
-
             connection_context->setCurrentQueryId(fmt::format("mysql:{}", connection_id));
-
+            auto & client_info = connection_context->getClientInfo();
+            client_info.initial_query_id = client_info.current_query_id;
         }
         catch (const Exception & exc)
         {
@@ -564,6 +565,8 @@ void MySQLHandler::comQuery(ReadBuffer & payload, bool binary_protocol)
         query_context->setSetting("max_execution_time", 18000);
         /// required by quickbi, otherwise it would fail to get table info
         query_context->setSetting("allow_mysql_having_name_resolution", 1);
+        /// to collect the affected rows for update/delete/insert
+        query_context->setSetting("insert_select_with_profiles", 1);
         CurrentThread::QueryScope query_scope{query_context};
 
         std::atomic<size_t> affected_rows {0};
@@ -572,7 +575,6 @@ void MySQLHandler::comQuery(ReadBuffer & payload, bool binary_protocol)
         {
             if (prev)
                 prev(progress);
-
             affected_rows += progress.written_rows;
         });
 
@@ -589,8 +591,9 @@ void MySQLHandler::comQuery(ReadBuffer & payload, bool binary_protocol)
 
         executeQuery(should_replace ? replacement : payload, *out, false, query_context, set_result_details, format_settings);
 
-        if (!with_output)
+        if (!with_output) {
             packet_endpoint->sendPacket(OKPacket(0x00, client_capabilities, affected_rows, 0, 0), true);
+        }
     }
 }
 
@@ -698,7 +701,7 @@ MySQLHandlerSSL::MySQLHandlerSSL(IServer & server_, TCPServer & tcp_server_, con
 
 void MySQLHandlerSSL::authPluginSSL()
 {
-    auth_plugin = std::make_unique<MySQLProtocol::Authentication::Sha256Password>(public_key, private_key, log);
+    auth_plugin = std::make_unique<MySQLProtocol::Authentication::Sha256Password>(public_key, private_key, log->name());
 }
 
 void MySQLHandlerSSL::finishHandshakeSSL(

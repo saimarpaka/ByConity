@@ -38,7 +38,9 @@
 #include <Storages/MergeTree/CloudTableDefinitionCache.h>
 #include <Storages/MergeTree/DeleteBitmapCache.h>
 #include <Storages/MergeTree/PrimaryIndexCache.h>
+#include <Storages/MergeTree/GINStoreReader.h>
 #include <Storages/UniqueKeyIndexCache.h>
+#include <Storages/NexusFS/NexusFS.h>
 #include <IO/UncompressedCache.h>
 #include <IO/MMappedFileCache.h>
 #include <IO/ReadHelpers.h>
@@ -107,7 +109,7 @@ AsynchronousMetrics::AsynchronousMetrics(
     int update_period_seconds,
     std::shared_ptr<std::vector<ProtocolServerAdapter>> servers_to_start_before_tables_,
     std::shared_ptr<std::vector<ProtocolServerAdapter>> servers_,
-    Poco::Logger * logger_)
+    LoggerPtr logger_)
     : WithContext(global_context_)
     , update_period(update_period_seconds)
     , servers_to_start_before_tables(servers_to_start_before_tables_)
@@ -723,10 +725,18 @@ void AsynchronousMetrics::update(std::chrono::system_clock::time_point update_ti
     }
 
     {
-        if (auto gin_store_cache = getContext()->getGinIndexStoreFactory())
+        if (auto nexus_fs = getContext()->getNexusFS())
         {
-            new_values["GinStoreCacheWeight"] = gin_store_cache->cacheWeight();
+            new_values["NexusFSNumSegments"] = nexus_fs->getNumSegments();
+            new_values["NexusFSNumFiles"] = nexus_fs->getNumFileMetas();
+            new_values["NexusFSNumInodes"] = nexus_fs->getNumInodes();
         }
+    }
+
+    if (auto gin_store_reader_factory = getContext()->getGINStoreReaderFactory())
+    {
+        new_values["GINReaderFactoryCacheBytes"] = gin_store_reader_factory->residentMemory();
+        new_values["GINReaderFactorySSTBlockCacheBytes"] = gin_store_reader_factory->sstBlockCacheSize();
     }
 
 #if USE_EMBEDDED_COMPILER
@@ -769,7 +779,7 @@ void AsynchronousMetrics::update(std::chrono::system_clock::time_point update_ti
             Int64 difference = new_amount - amount;
             /// Log only if difference is high. This is for convenience. The threshold is arbitrary.
             // if (difference >= 1048576 || difference <= -1048576)
-            LOG_DEBUG(&Poco::Logger::get("AsynchronousMetrics"),
+            LOG_DEBUG(getLogger("AsynchronousMetrics"),
                 "MemoryTracking: was {}, peak {}, free memory in arenas {}, hard limit will set to {}, RSS: {}, difference: {}, hualloc cache:{}",
                 ReadableSize(amount),
                 ReadableSize(peak),
@@ -782,7 +792,7 @@ void AsynchronousMetrics::update(std::chrono::system_clock::time_point update_ti
             Int64 difference = new_amount - amount;
             /// Log only if difference is high. This is for convenience. The threshold is arbitrary.
             if (difference >= 1048576 || difference <= -1048576)
-                LOG_DEBUG(&Poco::Logger::get("AsynchronousMetrics"),
+                LOG_DEBUG(getLogger("AsynchronousMetrics"),
                         "MemoryTracking: was {}, peak {}, will set to {} (RSS), difference: {}",
                         ReadableSize(amount),
                         ReadableSize(peak),

@@ -17,10 +17,12 @@
 
 #include <random>
 #include <Catalog/Catalog.h>
+#include <CloudServices/CnchBGThreadPartitionSelector.h>
 #include <CloudServices/CnchPartsHelper.h>
 #include <CloudServices/CnchDataWriter.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/ServerPartLog.h>
+#include <Storages/MergeTree/MergeTreeBgTaskStatistics.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH.h>
 #include <Storages/StorageCnchMergeTree.h>
@@ -38,7 +40,6 @@ namespace DB
 
 CnchPartGCThread::CnchPartGCThread(ContextPtr context_, const StorageID & id) : ICnchBGThread(context_, CnchBGThreadType::PartGC, id)
 {
-    partition_selector = getContext()->getBGPartitionSelector();
     data_remover = getContext()
                        ->getExtraSchedulePool(
                            SchedulePool::GC,
@@ -143,7 +144,7 @@ void CnchPartGCThread::runImpl()
 
         try
         {
-            Strings partitions = inWakeup() ? catalog->getPartitionIDs(istorage, nullptr) : selectPartitions(istorage);
+            Strings partitions = inWakeup() ? catalog->getPartitionIDs(istorage, nullptr) : selectPartitions(istorage, storage_settings);
             auto hit = doPhaseOneGC(istorage, storage, partitions);
             phase_one_continuous_hits = hit ? phase_one_continuous_hits + 1 : 0;
         }
@@ -300,19 +301,32 @@ TxnTimestamp CnchPartGCThread::calculateGCTimestamp(UInt64 delay_second, bool in
     return std::min({server_min_active_ts, max_gc_timestamp});
 }
 
-Strings CnchPartGCThread::selectPartitions(const StoragePtr & storage)
+Strings CnchPartGCThread::selectPartitions(const StoragePtr & istorage, MergeTreeSettingsPtr & storage_settings)
 {
     StringSet res;
     swapCandidatePartitions(res);
     LOG_TRACE(log, "[p1] Candidate partitions: {}", fmt::format("{}", fmt::join(res, ",")));
 
-    auto from_partition_selector = partition_selector->selectForGC(storage);
+    auto bg_task_stats = MergeTreeBgTaskStatisticsInitializer::instance().getOrCreateTableStats(storage_id);
+    auto get_all_partitions_callback = [&istorage, &bg_task_stats, this] () {
+        Strings partition_ids = catalog->getPartitionIDs(istorage, nullptr);
+        /// Add all unknown partitions to bg task stats, so these partitions can be selected by partition selector next time.
+        bg_task_stats->fillMissingPartitions(partition_ids);
+        return partition_ids;
+    };
+    CnchBGThreadPartitionSelector partition_selector(storage_id, bg_task_stats, {}, get_all_partitions_callback);
+
+    auto from_partition_selector = partition_selector.selectForGC(
+        /* n = */ storage_settings->cnch_gc_round_robin_partitions_number.value,
+        /* round_robin_interval = */ storage_settings->cnch_gc_round_robin_partitions_interval.value,
+        partition_round_robin_state);
+
     if (from_partition_selector.empty())
     {
         /// Partition selector would always return non-empty result (by round-robin or other strategies).
         /// In some corner case (like the table was detached before calling partition selector), we fall back to Catalog API.
         LOG_DEBUG(log, "[p1] Get all partitions from Catalog as partition selector returns empty result.");
-        return catalog->getPartitionIDs(storage, nullptr);
+        return get_all_partitions_callback();
     }
     for (const auto & p : from_partition_selector)
         res.insert(p);
@@ -360,13 +374,21 @@ void CnchPartGCThread::movePartsToTrash(const StoragePtr & storage, const Server
         });
     };
 
-    for (size_t start = 0; start < parts.size(); start += batch_size)
+    try
     {
-        auto end = std::min(start + batch_size, parts.size());
-        batch_remove(start, end);
+        for (size_t start = 0; start < parts.size(); start += batch_size)
+        {
+            auto end = std::min(start + batch_size, parts.size());
+            batch_remove(start, end);
+        }
+        remove_pool.wait();
+        LOG_DEBUG(log, "[p1] Successfully cleared metadata of {} {}", num_moved.load(), log_type);
     }
-    remove_pool.wait();
-    LOG_DEBUG(log, "[p1] Successfully cleared metadata of {} {}", num_moved.load(), log_type);
+    catch (...)
+    {
+        remove_pool.wait();
+        throw;
+    }
 }
 
 void CnchPartGCThread::moveDeleteBitmapsToTrash(const StoragePtr & storage, const DeleteBitmapMetaPtrVector & bitmaps, size_t pool_size, size_t batch_size)
@@ -448,10 +470,10 @@ void CnchPartGCThread::runDataRemoveTask()
         if (!istorage->is_dropped)
         {
             auto & storage = checkAndGetCnchTable(istorage);
-            size_t removed_size = doPhaseTwoGC(istorage, storage);
+            cleaned_items_in_a_round += doPhaseTwoGC(istorage, storage);
 
             auto storage_settings = storage.getSettings();
-            if (removed_size)
+            if (!phase_two_start_key.empty() || cleaned_items_in_a_round)
             {
                 sleep_ms
                     = std::uniform_int_distribution<UInt64>(0, storage_settings->cleanup_delay_period_random_add * 1000)(rng);
@@ -462,10 +484,12 @@ void CnchPartGCThread::runDataRemoveTask()
             {
                 round_removing_no_data++;
                 phase_two_continuous_hits = 0;
-                sleep_ms
-                    = std::min(storage_settings->cleanup_delay_period * 1000 * std::pow(1.4, round_removing_no_data), 5 * 60 * 1000.0);
+                sleep_ms = storage_settings->cleanup_delay_period_upper_bound * 1000;
                 LOG_TRACE(log, "[p2] Removed no data for {} round(s). Delay schedule for {} ms.", round_removing_no_data, sleep_ms);
             }
+
+            if (phase_two_start_key.empty())
+                cleaned_items_in_a_round = 0;
         }
     }
     catch (...)
@@ -532,9 +556,13 @@ size_t CnchPartGCThread::doPhaseTwoGC(const StoragePtr & istorage, StorageCnchMe
         return false;
     };
 
-    size_t pool_size = std::min(
-        static_cast<size_t>(2 * std::pow(2.0, phase_two_continuous_hits)),
-        static_cast<size_t>(storage.getSettings()->gc_remove_part_thread_pool_size));
+    /// pool_size should be at least 1.
+    size_t pool_size = std::max(
+        std::min(
+            /// Avoid the number get too large.
+            static_cast<size_t>(2 * std::pow(2.0, std::min(phase_two_continuous_hits, 15ul))),
+            static_cast<size_t>(storage.getSettings()->gc_remove_part_thread_pool_size)),
+        1ul);
     /// If batch_size <= 1, then round-robin may never move forward.
     size_t batch_size = std::max(static_cast<size_t>(storage.getSettings()->gc_remove_part_batch_size), static_cast<size_t>(2));
     LOG_TRACE(
@@ -611,6 +639,7 @@ size_t CnchPartGCThread::doPhaseTwoGC(const StoragePtr & istorage, StorageCnchMe
             size_t nbitmaps = items_removed.delete_bitmaps.size();
             LOG_DEBUG(log, "[p2] Will remove trash records of {} parts, {} delete bitmaps", nparts, nbitmaps);
             catalog->clearTrashItems(istorage, items_removed);
+            ServerPartLog::addDeleteParts(getContext(), storage_id, items_removed.data_parts);
             LOG_DEBUG(
                 log, "[p2] Completely removed data of {} parts and {} delete bitmaps in {} ms", nparts, nbitmaps, watch.elapsedMilliseconds());
             ntotal += (nparts + nbitmaps);

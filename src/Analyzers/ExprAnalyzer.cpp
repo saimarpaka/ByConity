@@ -49,6 +49,7 @@
 #include <QueryPlan/Void.h>
 #include <Poco/String.h>
 #include <Common/StringUtils/StringUtils.h>
+#include "Core/Field.h"
 
 #include <memory>
 
@@ -101,6 +102,7 @@ public:
         , use_ansi_semantic(context->getSettingsRef().dialect_type != DialectType::CLICKHOUSE)
         , enable_implicit_type_conversion(context->getSettingsRef().enable_implicit_type_conversion)
         , allow_extended_conversion(context->getSettingsRef().allow_extended_type_conversion)
+        , enable_implicit_arg_type_convert(context->getSettingsRef().enable_implicit_arg_type_convert)
         , scopes({scope_})
     {
     }
@@ -114,6 +116,7 @@ private:
     const bool use_ansi_semantic;
     const bool enable_implicit_type_conversion;
     const bool allow_extended_conversion;
+    const bool enable_implicit_arg_type_convert;
 
     std::vector<ScopePtr> scopes;
     // whether we are in an aggregate function
@@ -423,9 +426,7 @@ ColumnWithTypeAndName ExprAnalyzerVisitor::analyzeOrdinaryFunction(ASTFunctionPt
 
     ColumnPtr res_col;
     auto function_ret_type = function_base->getResultType();
-    if (options.evaluate_constant_expression && function_base->isSuitableForConstantFolding()
-        && !functionIsDictGet(function->name) // 01852_dictionary_found_rate_long
-        && !functionIsInOrGlobalInOperator(function->name))
+    if (options.evaluate_constant_expression && function_base->isSuitableForConstantFoldingInOptimizer())
     {
         if (all_const)
             res_col = function_base->execute(processed_arguments, function_ret_type, 1, false);
@@ -646,7 +647,18 @@ void ExprAnalyzerVisitor::processSubqueryArgsWithCoercion(ASTPtr & lhs_ast, ASTP
         }
         // TODO: better handle empty set
         if (coll.empty())
-            coll.push_back(Null{});
+        {
+            if (set_columns.size() == 1)
+            {
+                coll.push_back(Null{});
+            }
+            else
+            {
+                Tuple nested_tuple(set_columns.size(), Field());
+                coll.push_back(nested_tuple);
+            }
+        }
+
         rhs_ast = std::make_shared<ASTLiteral>(std::move(coll));
         return;
     }
@@ -673,7 +685,7 @@ void ExprAnalyzerVisitor::processSubqueryArgsWithCoercion(ASTPtr & lhs_ast, ASTP
                 }
             }
             else
-                super_type = getLeastSupertype(DataTypes{lhs_type, rhs_type}, allow_extended_conversion);
+                super_type = getCommonType(DataTypes{lhs_type, rhs_type}, enable_implicit_arg_type_convert, allow_extended_conversion);
         }
         if (!super_type)
             throw Exception("Incompatible types for IN prediacte", ErrorCodes::TYPE_MISMATCH);

@@ -849,7 +849,7 @@ void StorageReplicatedMergeTree::drop()
     dropAllData();
 }
 
-void StorageReplicatedMergeTree::dropReplica(zkutil::ZooKeeperPtr zookeeper, const String & zookeeper_path, const String & replica, Poco::Logger * logger)
+void StorageReplicatedMergeTree::dropReplica(zkutil::ZooKeeperPtr zookeeper, const String & zookeeper_path, const String & replica, LoggerPtr logger)
 {
     if (zookeeper->expired())
         throw Exception("Table was not dropped because ZooKeeper session has expired.", ErrorCodes::TABLE_WAS_NOT_DROPPED);
@@ -914,7 +914,7 @@ void StorageReplicatedMergeTree::dropReplica(zkutil::ZooKeeperPtr zookeeper, con
 }
 
 bool StorageReplicatedMergeTree::removeTableNodesFromZooKeeper(zkutil::ZooKeeperPtr zookeeper,
-        const String & zookeeper_path, const zkutil::EphemeralNodeHolder::Ptr & metadata_drop_lock, Poco::Logger * logger)
+        const String & zookeeper_path, const zkutil::EphemeralNodeHolder::Ptr & metadata_drop_lock, LoggerPtr logger)
 {
     bool completely_removed = false;
     Strings children;
@@ -986,8 +986,8 @@ void StorageReplicatedMergeTree::checkTableStructure(const String & zookeeper_pr
 void StorageReplicatedMergeTree::setTableStructure(
     ColumnsDescription new_columns, const ReplicatedMergeTreeTableMetadata::Diff & metadata_diff)
 {
-    StorageInMemoryMetadata new_metadata = getInMemoryMetadata();
-    StorageInMemoryMetadata old_metadata = getInMemoryMetadata();
+    StorageInMemoryMetadata new_metadata = getInMemoryMetadataCopy();
+    StorageInMemoryMetadata old_metadata = getInMemoryMetadataCopy();
 
     new_metadata.columns = new_columns;
 
@@ -4596,7 +4596,7 @@ BlockOutputStreamPtr StorageReplicatedMergeTree::write(const ASTPtr & /*query*/,
     return std::make_shared<ReplicatedMergeTreeBlockOutputStream>(
         *this, metadata_snapshot, query_settings.insert_quorum,
         query_settings.insert_quorum_timeout.totalMilliseconds(),
-        query_settings.max_partitions_per_insert_block,
+        storage_settings_ptr->max_partitions_per_insert_block.changed ? storage_settings_ptr->max_partitions_per_insert_block : query_settings.max_partitions_per_insert_block,
         query_settings.insert_quorum_parallel,
         deduplicate,
         local_context);
@@ -4872,7 +4872,7 @@ void StorageReplicatedMergeTree::alter(
     {
         /// We don't replicate storage_settings_ptr ALTER. It's local operation.
         /// Also we don't upgrade alter lock to table structure lock.
-        StorageInMemoryMetadata future_metadata = getInMemoryMetadata();
+        StorageInMemoryMetadata future_metadata = getInMemoryMetadataCopy();
         commands.apply(future_metadata, query_context);
 
         merge_strategy_picker.refreshState();
@@ -4905,7 +4905,7 @@ void StorageReplicatedMergeTree::alter(
         StorageInMemoryMetadata future_metadata = *current_metadata;
 
         commands.apply(future_metadata, query_context);
-        checkColumnsValidity(future_metadata.columns, future_metadata.settings_changes);
+        checkMetadataValidity(future_metadata.columns, future_metadata.settings_changes);
 
         ReplicatedMergeTreeTableMetadata future_metadata_in_zk(*this, current_metadata);
         if (ast_to_str(future_metadata.sorting_key.definition_ast) != ast_to_str(current_metadata->sorting_key.definition_ast))

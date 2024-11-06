@@ -122,5 +122,6 @@ void updateAsyncQueryStatus(
 
 void interpretSettings(ASTPtr ast, ContextMutablePtr context);
 
-void adjustAccessTablesIfNeeded(ContextMutablePtr & context);
+bool needThrowRootCauseError(const Context * context, int & error_code, String & error_messge);
+
 }

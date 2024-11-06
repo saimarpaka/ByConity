@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Common/Logger.h>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,6 +28,7 @@ struct PlanSegmentsStatus
     std::atomic<bool> is_cancel{false};
     Int32 error_code;
     String exception;
+    PlanSegmentExecutionInfo final_execution_info;
 };
 
 using PlanSegmentsStatusPtr = std::shared_ptr<PlanSegmentsStatus>;
@@ -37,7 +39,7 @@ using StorageUnions = std::vector<std::unordered_set<UUID>>;
 using StorageUnionsPtr = std::shared_ptr<StorageUnions>;
 struct SourcePruner
 {
-    SourcePruner(PlanSegmentTree * plan_segments_ptr_, Poco::Logger * log_)
+    SourcePruner(PlanSegmentTree * plan_segments_ptr_, LoggerPtr log_)
         : plan_segments_ptr(plan_segments_ptr_), log(log_)
     {
     }
@@ -56,14 +58,14 @@ private:
     void generateUnprunableSegments();
     void generateSegmentStorageMap();
     PlanSegmentTree * plan_segments_ptr;
-    Poco::Logger * log;
+    LoggerPtr log;
 };
 
 using SourcePrunerPtr = std::shared_ptr<SourcePruner>;
 
 struct DAGGraph
 {
-    DAGGraph() : log(&Poco::Logger::get("DAGGraph")) { async_context = std::make_shared<AsyncContext>(); }
+    DAGGraph() : log(getLogger("DAGGraph")) { async_context = std::make_shared<AsyncContext>(); }
     void joinAsyncRpcWithThrow();
     void joinAsyncRpcPerStage();
     void joinAsyncRpcAtLast();
@@ -76,14 +78,15 @@ struct DAGGraph
         source_pruner = std::make_shared<SourcePruner>(plan_segments_ptr, log);
         return source_pruner;
     }
-    
-    /// all segments containing only table scan
+
+    /// all segments containing only table scan/value
     SegmentIds leaf_segments;
-    /// all segments contain at least table scan
-    SegmentIds segments_has_table_scan;
+    /// all segments contain at least table scan/value
+    SegmentIds table_scan_or_value_segments;
     size_t final = std::numeric_limits<size_t>::max();
     std::set<size_t> scheduled_segments;
     std::unordered_map<size_t, PlanSegment *> id_to_segment;
+    std::unordered_map<size_t, std::pair<std::shared_ptr<PlanSegmentInput>, std::shared_ptr<PlanSegmentOutput>>> exchanges;
     std::unordered_map<size_t, AddressInfos> id_to_address;
     /// final worker address where task is successfully executed
     mutable std::mutex finished_address_mutex;
@@ -101,7 +104,7 @@ struct DAGGraph
     butil::IOBuf query_settings_buf;
     SourcePrunerPtr source_pruner;
 
-    Poco::Logger * log;
+    LoggerPtr log;
 };
 
 using DAGGraphPtr = std::shared_ptr<DAGGraph>;
@@ -109,13 +112,13 @@ using DAGGraphPtr = std::shared_ptr<DAGGraph>;
 class AdaptiveScheduler
 {
 public:
-    explicit AdaptiveScheduler(const ContextPtr & context) : query_context(context), log(&Poco::Logger::get("AdaptiveScheduler")) { }
+    explicit AdaptiveScheduler(const ContextPtr & context) : query_context(context), log(getLogger("AdaptiveScheduler")) { }
     std::vector<size_t> getRandomWorkerRank();
     std::vector<size_t> getHealthyWorkerRank();
 
 private:
     const ContextPtr query_context;
-    Poco::Logger * log;
+    LoggerPtr log;
 };
 
 } // namespace DB

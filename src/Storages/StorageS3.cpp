@@ -130,12 +130,9 @@ public:
         const std::string & version_id_,
         const std::vector<String> & keys_,
         const String & bucket_,
-        const S3Settings::ReadWriteSettings & request_settings_,
+        const S3Settings::RequestSettings & request_settings_,
         KeysWithInfo * read_keys_)
-        : keys(keys_)
-        , version_id(version_id_)
-        , bucket(bucket_)
-        , request_settings(request_settings_)
+        : keys(keys_), version_id(version_id_), bucket(bucket_), request_settings(request_settings_)
     {
         client = std::unique_ptr<Aws::S3::S3Client>(new Aws::S3::S3Client(client_));
 
@@ -167,7 +164,7 @@ private:
     std::unique_ptr<Aws::S3::S3Client> client;
     String version_id;
     String bucket;
-    S3Settings::ReadWriteSettings request_settings;
+    S3Settings::RequestSettings request_settings;
 };
 
 StorageS3Source::KeysIterator::KeysIterator(
@@ -175,10 +172,9 @@ StorageS3Source::KeysIterator::KeysIterator(
     const std::string & version_id_,
     const std::vector<String> & keys_,
     const String & bucket_,
-    const S3Settings::ReadWriteSettings & request_settings_,
+    const S3Settings::RequestSettings & request_settings_,
     KeysWithInfo * read_keys)
-    : pimpl(std::make_shared<StorageS3Source::KeysIterator::Impl>(
-        client_, version_id_, keys_, bucket_, request_settings_, read_keys))
+    : pimpl(std::make_shared<StorageS3Source::KeysIterator::Impl>(client_, version_id_, keys_, bucket_, request_settings_, read_keys))
 {
 }
 
@@ -200,7 +196,7 @@ public:
         const NamesAndTypesList & virtual_columns_,
         ContextPtr context_,
         KeysWithInfo * read_keys_,
-        const S3Settings::ReadWriteSettings & request_settings_)
+        const S3Settings::RequestSettings & request_settings_)
         : WithContext(context_)
         , globbed_uri(globbed_uri_)
         , virtual_columns(virtual_columns_)
@@ -453,7 +449,7 @@ private:
     KeysWithInfo * read_keys;
 
     Aws::S3::Model::ListObjectsV2Request request;
-    S3Settings::ReadWriteSettings request_settings;
+    S3Settings::RequestSettings request_settings;
 
     ThreadPool list_objects_pool;
     ThreadPoolCallbackRunner<ListObjectsOutcome> list_objects_scheduler;
@@ -468,8 +464,9 @@ StorageS3Source::DisclosedGlobIterator::DisclosedGlobIterator(
     const NamesAndTypesList & virtual_columns,
     ContextPtr context,
     KeysWithInfo * read_keys_,
-    const S3Settings::ReadWriteSettings & request_settings_)
-    : pimpl(std::make_shared<StorageS3Source::DisclosedGlobIterator::Impl>(client_, globbed_uri_, virtual_columns, context, read_keys_, request_settings_))
+    const S3Settings::RequestSettings & request_settings_)
+    : pimpl(std::make_shared<StorageS3Source::DisclosedGlobIterator::Impl>(
+        client_, globbed_uri_, virtual_columns, context, read_keys_, request_settings_))
 {
 }
 
@@ -540,7 +537,7 @@ StorageS3Source::StorageS3Source(
     const ContextPtr & context_,
     std::optional<FormatSettings> format_settings_,
     UInt64 max_block_size_,
-    const S3Settings::ReadWriteSettings & request_settings_,
+    const S3Settings::RequestSettings & request_settings_,
     String compression_hint_,
     const std::shared_ptr<Aws::S3::S3Client> & client_,
     const String & bucket_,
@@ -568,7 +565,8 @@ StorageS3Source::StorageS3Source(
     , file_iterator(file_iterator_)
     , max_parsing_threads(max_parsing_threads_)
     , need_only_count(need_only_count_)
-    , create_reader_pool(CurrentMetrics::StorageS3Threads, CurrentMetrics::StorageS3ThreadsActive, CurrentMetrics::StorageS3ThreadsScheduled, 1)
+    , create_reader_pool(
+          CurrentMetrics::StorageS3Threads, CurrentMetrics::StorageS3ThreadsActive, CurrentMetrics::StorageS3ThreadsScheduled, 1)
 {
     initialize();
 }
@@ -599,7 +597,7 @@ bool StorageS3Source::initialize(size_t idx)
             request_settings.max_single_read_retries),
             chooseCompressionMethod(key_with_info->key, compression_hint));
 
-    LOG_DEBUG(&Poco::Logger::get("StorageS3Source"), "max parsing threads = {} need_only_count = {}", max_parsing_threads, need_only_count);
+    LOG_DEBUG(getLogger("StorageS3Source"), "max parsing threads = {} need_only_count = {}", max_parsing_threads, need_only_count);
 
     auto input_format = FormatFactory::instance().getInput(
         format, *read_buf, sample_block, getContext(), max_block_size);
@@ -1188,7 +1186,7 @@ void StorageS3::truncate(const ASTPtr & /* query */, const StorageMetadataPtr &,
     }
 
     for (const auto & error : response.GetResult().GetErrors())
-        LOG_WARNING(&Poco::Logger::get("StorageS3"), "Failed to delete {}, error: {}", error.GetKey(), error.GetMessage());
+        LOG_WARNING(getLogger("StorageS3"), "Failed to delete {}, error: {}", error.GetKey(), error.GetMessage());
 }
 
 namespace
@@ -1234,7 +1232,7 @@ namespace
                 /// For default mode check cached columns for currently read keys on first iteration.
                 if (first && getContext()->getSettingsRef().schema_inference_mode == SchemaInferenceMode::DEFAULT)
                 {
-                    LOG_TRACE(&Poco::Logger::get("StorageS3Source"), "ReadBufferIterator first get columns from cache.");
+                    LOG_TRACE(getLogger("StorageS3Source"), "ReadBufferIterator first get columns from cache.");
 
                     if (auto cached_columns = tryGetColumnsFromCache(read_keys.begin(), read_keys.end()))
                         return {nullptr, cached_columns, format};
@@ -1265,7 +1263,7 @@ namespace
                     return {nullptr, std::nullopt, format};
                 }
 
-                LOG_TRACE(&Poco::Logger::get("StorageS3Source"), "ReadBufferIterator read_keys size {} prev_read_keys_size = {}", read_keys.size(), prev_read_keys_size);
+                LOG_TRACE(getLogger("StorageS3Source"), "ReadBufferIterator read_keys size {} prev_read_keys_size = {}", read_keys.size(), prev_read_keys_size);
 
                 /// S3 file iterator could get new keys after new iteration
                 if (read_keys.size() > prev_read_keys_size)
@@ -1308,7 +1306,7 @@ namespace
                     }
                 }
 
-                LOG_TRACE(&Poco::Logger::get("StorageS3Source"), "ReadBufferFromS3 bucket {} key {}", configuration.url.bucket, current_key_with_info->key);
+                LOG_TRACE(getLogger("StorageS3Source"), "ReadBufferFromS3 bucket {} key {}", configuration.url.bucket, current_key_with_info->key);
 
                 auto impl = std::make_unique<ReadBufferFromS3>(
                     configuration.client,
@@ -1473,7 +1471,7 @@ std::pair<ColumnsDescription, String> StorageS3::getTableStructureAndFormatFromD
     const ContextPtr & ctx)
 {
     KeysWithInfo read_keys;
-    LOG_TRACE(&Poco::Logger::get("StorageS3"), " getTableStructureAndFormatFromDataImpl start createFileIterator ");
+    LOG_TRACE(getLogger("StorageS3"), " getTableStructureAndFormatFromDataImpl start createFileIterator ");
     auto file_iterator = createFileIterator(configuration, false, ctx, {}, &read_keys);
 
     ReadBufferIterator read_buffer_iterator(file_iterator, read_keys, configuration, format, format_settings, ctx);

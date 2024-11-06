@@ -65,10 +65,7 @@ std::vector<TaskInfoLog> batchReadTaskLog(ContextPtr context, DateTime64 min_eve
         event_date_str,
         event_time_str);
 
-
-    auto helper = SubqueryHelper::create(context, select_sql);
-    while (auto block = helper.getNextBlock())
-    {
+    auto proc_block = [&result](Block & block) {
         auto index_base = result.size();
         result.resize(result.size() + block.rows());
         for (size_t i = 0; i < block.columns(); ++i)
@@ -121,10 +118,12 @@ std::vector<TaskInfoLog> batchReadTaskLog(ContextPtr context, DateTime64 min_eve
                 }
             }
         }
-    }
+    };
+    auto query_context = SubqueryHelper::createQueryContext(context);
+    executeSubQuery(select_sql, query_context, proc_block, true);
 
     LOG_DEBUG(
-        &Poco::Logger::get("AutoStatsTaskLogHelper"),
+        getLogger("AutoStatsTaskLogHelper"),
         fmt::format(FMT_STRING("batchReadTaskLog: read {} useful entries with min_event_time='{}'"), result.size(), event_time_str));
 
     return result;

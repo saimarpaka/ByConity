@@ -90,7 +90,8 @@ enum StealingCacheMode : UInt64
       "Whether to write blocks in Native format to write-ahead-log before creation in-memory part", \
       0) \
     M(UInt64, write_ahead_log_max_bytes, 1024 * 1024 * 1024, "Rotate WAL, if it exceeds that amount of bytes", 0) \
-\
+    M(Bool, reorganize_marks_data_layout, false, "Whether to use the data layout of concentrated marks for cnch part", 0) \
+    \
     /** Merge settings. */ \
     M(UInt64, merge_max_block_size, DEFAULT_MERGE_BLOCK_SIZE, "How many rows in blocks should be formed for merge operations, By default has the same value as `index_granularity`.", 0) \
     M(UInt64, merge_max_block_size_bytes, 10 * 1024 * 1024, "How many bytes in blocks should be formed for merge operations. By default has the same value as `index_granularity_bytes`.", 0) \
@@ -141,37 +142,15 @@ enum StealingCacheMode : UInt64
     M(UInt64, max_refresh_materialized_view_task_num, 10, "Max threads to refresh for each materialized view.", 0) \
     \
     /** Inserts settings. */ \
-    M(UInt64, \
-      parts_to_delay_insert, \
-      150, \
-      "If table contains at least that many active parts in single partition, artificially slow down insert into table.", \
-      0) \
-    M(UInt64, \
-      inactive_parts_to_delay_insert, \
-      0, \
-      "If table contains at least that many inactive parts in single partition, artificially slow down insert into table.", \
-      0) \
-    M(UInt64, \
-      parts_to_throw_insert, \
-      300, \
-      "If more than this number active parts in single partition, throw 'Too many parts ...' exception.", \
-      0) \
-    M(UInt64, \
-      inactive_parts_to_throw_insert, \
-      0, \
-      "If more than this number inactive parts in single partition, throw 'Too many inactive parts ...' exception.", \
-      0) \
-    M(UInt64, \
-      max_delay_to_insert, \
-      1, \
-      "Max delay of inserting data into MergeTree table in seconds, if there are a lot of unmerged parts in single partition.", \
-      0) \
-    M(UInt64, \
-      max_parts_in_total, \
-      100000, \
-      "If more than this number active parts in all partitions in total, throw 'Too many parts ...' exception.", \
-      0) \
-\
+    M(UInt64, parts_to_delay_insert, 0, "If table contains at least that many active parts in single partition, artificially slow down insert into table.", 0) \
+    M(UInt64, inactive_parts_to_delay_insert, 0, "If table contains at least that many inactive parts in single partition, artificially slow down insert into table.", 0) \
+    M(UInt64, parts_to_throw_insert, 0, "If more than this number active parts in single partition, throw 'Too many parts ...' exception.", 0) \
+    M(UInt64, inactive_parts_to_throw_insert, 0, "If more than this number inactive parts in single partition, throw 'Too many inactive parts ...' exception.", 0) \
+    M(UInt64, max_delay_to_insert, 1, "Max delay of inserting data into MergeTree table in seconds, if there are a lot of unmerged parts in single partition.", 0) \
+    M(UInt64, max_parts_in_total, 0, "If more than this number active parts in all partitions in total, throw 'Too many parts ...' exception.", 0) \
+    M(UInt64, max_partitions_per_insert_block, 100, "Table level setting; The same as max_partitions_per_insert_block in Core/Settings", 0) \
+    M(UInt64, insert_check_parts_interval, 60, "Check the parts number to delay or block insert with such a interval(in Seconds)", 0) \
+    \
     /** Replication settings. */ \
     M(UInt64, \
       replicated_deduplication_window, \
@@ -281,32 +260,17 @@ enum StealingCacheMode : UInt64
       0) \
 \
     /** Check delay of replicas settings. */ \
-    M(UInt64, \
-      min_relative_delay_to_measure, \
-      120, \
-      "Calculate relative replica delay only if absolute delay is not less that this value.", \
-      0) \
-    M(UInt64, cleanup_delay_period, 30, "Period to clean old queue logs, blocks hashes and parts.", 0) \
-    M(UInt64, \
-      cleanup_delay_period_random_add, \
-      10, \
-      "Add uniformly distributed value from 0 to x seconds to cleanup_delay_period to avoid thundering herd effect and subsequent DoS of " \
-      "ZooKeeper in case of very large number of tables.", \
-      0) \
-    M(UInt64, \
-      min_relative_delay_to_close, \
-      300, \
-      "Minimal delay from other replicas to close, stop serving requests and not return Ok during status check.", \
-      0) \
-    M(UInt64, \
-      min_absolute_delay_to_close, \
-      0, \
-      "Minimal absolute delay to close, stop serving requests and not return Ok during status check.", \
-      0) \
+    M(UInt64, min_relative_delay_to_measure, 120, "Calculate relative replica delay only if absolute delay is not less that this value.", 0) \
+    M(UInt64, cleanup_delay_period, 30, "Sleep interval between each scan for phase-two GC. (in seconds)", 0) \
+    M(UInt64, cleanup_delay_period_upper_bound, 15 * 60, "Max sleep interval for phase-two GC when are no items to delete in a round. (in seconds)", 0) \
+    M(UInt64, cleanup_delay_period_random_add, 10, "Add uniformly distributed value from 0 to x seconds to cleanup_delay_period to avoid thundering herd effect and subsequent DoS of ZooKeeper in case of very large number of tables.", 0) \
+    M(UInt64, min_relative_delay_to_close, 300, "Minimal delay from other replicas to close, stop serving requests and not return Ok during status check.", 0) \
+    M(UInt64, min_absolute_delay_to_close, 0, "Minimal absolute delay to close, stop serving requests and not return Ok during status check.", 0) \
     M(UInt64, enable_vertical_merge_algorithm, 1, "Enable usage of Vertical merge algorithm.", 0) \
     M(UInt64, vertical_merge_algorithm_min_rows_to_activate, 16 * DEFAULT_MERGE_BLOCK_SIZE, "Minimal (approximate) sum of rows in merging parts to activate Vertical merge algorithm.", 0) \
     M(UInt64, vertical_merge_algorithm_min_columns_to_activate, 11, "Minimal amount of non-PK columns to activate Vertical merge algorithm.", 0) \
     M(String, cluster_by_hint, "", "same as cluster by in ddl, but not enforced, user ensure data is correct.", 0)                                  \
+    M(Int64, partition_by_monotonicity_hint, 0, "Hint on whether partition by expression is a monotonic function or not, e.g., '(toYYYYMMDD(ts), toHour(ts))' is a monotonic non-decreasing function. 0 means unknown, Positive means monotonic non-decrasing, Negative means monotonic non-increasing", 0) \
     /** Compatibility settings */ \
     M(Bool, \
       compatibility_allow_sampling_expression_not_in_primary_key, \
@@ -416,6 +380,7 @@ enum StealingCacheMode : UInt64
     M(Seconds, checkpoint_delay_period, 120, "Interval between two rounds of checkpoint tasks in Checkpoint BG thread", 0) \
     M(Seconds, manifest_list_lifetime, 1800, "Lifetime of the manifest list. Oudated manifests can be cleaned by Checkpoint GC thread", 0) \
     M(UInt64, max_active_manifest_list, 10, "Max number of new manifest list before trigger one checkpoint task.", 0) \
+    M(Bool, as_main_table, false, "Always being main table for query forwarding when there are multiple tables in the query", 0) \
     /** Minimal amount of bytes to enable O_DIRECT in merge (0 - disabled, "", 0) */                                 \
     \
     /** If true, replicated tables would prefer to merge locally rather than                                  |\
@@ -459,7 +424,7 @@ enum StealingCacheMode : UInt64
     M(Bool, enable_addition_bg_task, false, "", 0) \
     M(UInt64, max_addition_bg_task_num, 32, "", 0) \
     M(Int64, max_addition_mutation_task_num, 10, "", 0) \
-    M(UInt64, max_partition_for_multi_select, 3, "", 0) \
+    M(UInt64, max_partition_for_multi_select, 10, "", 0) \
     \
     /** Settings for parts cache on server for MergeTasks. Cache speed up the task scheduling. */             \
     M(UInt64, cnch_merge_parts_cache_timeout, 10 * 60, "", 0)                                  \
@@ -467,6 +432,7 @@ enum StealingCacheMode : UInt64
     M(UInt64, cnch_merge_max_total_rows_to_merge, 50000000, "", 0) \
     M(UInt64, cnch_merge_max_total_bytes_to_merge, 150ULL * 1024 * 1024 * 1024, "", 0) \
     M(UInt64, cnch_merge_max_parts_to_merge, 100, "", 0) \
+    M(Int64, cnch_merge_expected_parts_number, 0, "Expected part numbers per partition, used to control merge selecting frequency and task size. 0 means using worker numbers in vw settings, negative value means disable this feature.", 0) \
     M(UInt64, cnch_mutate_max_parts_to_mutate, 100, "", 0) \
     M(UInt64, cnch_mutate_max_total_bytes_to_mutate, 50UL * 1024 * 1024 * 1024, "", 0) \
     \
@@ -495,8 +461,19 @@ enum StealingCacheMode : UInt64
     M(Seconds, check_duplicate_key_interval, 3600, "Interval of check duplicate key", 0) \
     M(Bool, duplicate_auto_repair, false, "Whether to automatically repair duplicate keys. This process is on the worker, but it may affect other writes as the lock is held.", 0) \
     M(Seconds, duplicate_repair_interval, 600, "Interval of check duplicate key", 0) \
-    /**Whether block the actual dedup progress, Attention: set this value to true only in ci **/               \
-    M(Bool, disable_dedup_parts, false, "", 0) \
+    M(Bool, enable_unique_partial_update, false, "Enable partial update", 0) \
+    M(Bool, enable_unique_row_store, false, "TODO: support further to enhance point query perf", 0) \
+    M(MaxThreads, partial_update_query_parts_thread_size, 8, "The thread size of query data parts.", 0) \
+    M(MaxThreads, partial_update_query_columns_thread_size, 1, "The thread size of query columns for each part.", 0) \
+    M(MaxThreads, partial_update_replace_columns_thread_size, 8, "The thread size of replace columns.", 0) \
+    M(Bool, partial_update_enable_merge_map, true, "Map row will just replace the original one when it's false. Otherwise, it will merge row.", 0) \
+    M(Bool, partial_update_optimize_for_batch_task, true, "Optimize partial update process when _update_columns_ are all same for batch processing.", 0) \
+    M(DedupImplVersion, dedup_impl_version, DedupImplVersion::DEDUP_IN_WRITE_SUFFIX, "Choose different dedup impl version for unique table write process, current valid values: DEDUP_IN_WRITE_SUFFIX, DEDUP_IN_TXN_COMMIT.", 0) \
+    M(DedupPickWorkerAlgo, dedup_pick_worker_algo, DedupPickWorkerAlgo::CONSISTENT_HASH, "", 0) \
+    /** CI settings || test settings **/               \
+    M(Bool, disable_dedup_parts, false, "Whether block the actual dedup progress.", 0) \
+    M(Bool, partial_update_detail_logging, false, "Whether print some detailed troubleshooting information, only used for test scenarios.", 0) \
+    M(Bool, pick_first_worker_to_dedup, false, "[deprecated, use dedup_pick_worker_algo] Whether always pick the first worker(for dedup stage) in vw for stress test.", 0) \
     \
     /* Metastore settings */\
     M(Bool, enable_metastore, false, "Use KV metastore to manage data parts.", 0) \
@@ -506,7 +483,9 @@ enum StealingCacheMode : UInt64
     /** Obsolete settings. Kept for backward compatibility only. */ \
     \
     M(Bool, enable_local_disk_cache, true, "Enable local disk cache", 0) \
-    /*keep enable_preload_parts for compitable*/ \
+    M(Bool, enable_cloudfs, false, "CROSS feature for table level setting", 0) \
+    M(Bool, enable_nexus_fs, false, "Enable local NexusFS", 0) \
+    /*keep enable_preload_parts for compitable*/\
     M(Bool, enable_preload_parts, false, "Enable preload parts", 0) \
     M(UInt64, parts_preload_level, 0, "0=close preload;1=preload meta;2=preload data;3=preload meta&data", 0) \
     M(Bool, enable_parts_sync_preload, 0, "Enable sync preload parts", 0) \
@@ -534,7 +513,7 @@ enum StealingCacheMode : UInt64
       "Select nonadjacent parts is allowed in the original design. Remove this when the feature is fully verified", \
       0) \
     M(String, cnch_merge_pick_worker_algo, "RM", "RM - using RM, RoundRobin: - local round robin strategy", 0) \
-    M(UInt64, cnch_merge_round_robin_partitions_interval, 600, "", 0) \
+    M(UInt64, cnch_merge_round_robin_partitions_interval, 300, "", 0) \
     M(UInt64, cnch_gc_round_robin_partitions_interval, 600, "", 0) \
     M(UInt64, cnch_gc_round_robin_partitions_number, 10, "", 0) \
     M(UInt64, cnch_meta_rpc_timeout_ms, 8000, "", 0) \

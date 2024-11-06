@@ -16,10 +16,13 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
+#include <vector>
 #include <Core/Names.h>
 #include <Core/Block.h>
 #include <Columns/IColumn.h>
 #include <Common/PODArray.h>
+#include <Interpreters/Context.h>
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/StorageID.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH_fwd.h>
@@ -34,6 +37,60 @@ class DeleteBitmapMeta;
 using DeleteBitmapMetaPtr = std::shared_ptr<DeleteBitmapMeta>;
 using DeleteBitmapMetaPtrVector = std::vector<DeleteBitmapMetaPtr>;
 class CnchServerTransaction;
+struct StorageInMemoryMetadata;
+using StorageMetadataPtr = std::shared_ptr<const StorageInMemoryMetadata>;
+
+/// XXX: The effect is a bit repetitive with ReplacingSortedKeysIterator::RowPos
+struct SearchKeyResult
+{
+    int part_index;
+    size_t part_rowid;
+    size_t part_version;
+
+    SearchKeyResult() : part_index(-1), part_rowid(0), part_version(0) {}
+    SearchKeyResult(size_t part_index_, size_t part_rowid_, size_t part_row_version_)
+        : part_index(part_index_), part_rowid(part_rowid_), part_version(part_row_version_) {}
+};
+
+struct BlockUniqueKeyUnorderedComparator
+{
+    const ColumnsWithTypeAndName & keys;
+    explicit BlockUniqueKeyUnorderedComparator(const ColumnsWithTypeAndName & keys_) : keys(keys_) { }
+
+    bool operator()(size_t lhs, size_t rhs) const
+    {
+        for (const auto & key : keys)
+            if (key.column->compareAt(lhs, rhs, *key.column, /*nan_direction_hint=*/1))
+                return false;
+        return true;
+    }
+};
+
+struct BlockUniqueKeyHasher
+{
+    const ColumnsWithTypeAndName & keys;
+    explicit BlockUniqueKeyHasher(const ColumnsWithTypeAndName & keys_) : keys(keys_) { }
+
+    size_t operator()(size_t rowid) const
+    {
+        size_t hash_value{0};
+        std::hash<std::string_view> hash_function;
+        for (const auto & key : keys)
+            hash_value ^= hash_function(key.column.get()->getDataAt(rowid).toView());
+        return hash_value;
+    }
+};
+
+struct RowidPair
+{
+    UInt32 part_rowid;
+    UInt32 block_rowid;
+};
+
+using SearchKeysResult = std::vector<SearchKeyResult>;
+using UniqueKeys = std::vector<String>;
+using RowidPairs = std::vector<RowidPair>;
+using PartRowidPairs = std::vector<RowidPairs>;
 }
 
 
@@ -133,8 +190,13 @@ public:
     /// Filter parts if lock scope is bucket level
     void filterParts(MergeTreeDataPartsCNCHVector & parts) const;
 
+    String toString() const;
+
 private:
-    DedupScope(DedupLevel dedup_level_, LockLevel lock_level_ = LockLevel::NORMAL) : dedup_level(dedup_level_), lock_level(lock_level_) { }
+    explicit DedupScope(DedupLevel dedup_level_, LockLevel lock_level_ = LockLevel::NORMAL)
+        : dedup_level(dedup_level_), lock_level(lock_level_)
+    {
+    }
 
     DedupLevel dedup_level;
     LockLevel lock_level;
@@ -176,6 +238,9 @@ struct DedupTask
 {
     DedupMode dedup_mode;
     StorageID storage_id;
+    CnchDedupHelper::DedupScope dedup_scope = DedupScope::TableDedup();
+    bool is_sub_task;
+
     MutableMergeTreeDataPartsCNCHVector new_parts;
     DeleteBitmapMetaPtrVector delete_bitmaps_for_new_parts;
 
@@ -184,6 +249,11 @@ struct DedupTask
 
     MutableMergeTreeDataPartsCNCHVector visible_parts;
     DeleteBitmapMetaPtrVector delete_bitmaps_for_visible_parts;
+
+    void fillSubDedupTask(DedupTask & sub_dedup_task);
+
+    std::atomic<UInt32> finished_task_num;
+    std::atomic<UInt32> failed_task_num;
 
     struct Statistics
     {
@@ -194,7 +264,7 @@ struct DedupTask
         UInt64 other_cost = 0;
         UInt64 total_cost = 0;
 
-        String toString()
+        String toString() const
         {
             return fmt::format(
                 "[acquire lock cost {} ms, get metadata cost {} ms, execute task cost {} ms, other cost {} ms, total cost {} ms]",
@@ -206,7 +276,12 @@ struct DedupTask
         }
     } statistics;
 
-    explicit DedupTask(const DedupMode & dedup_mode_, const StorageID & storage_id_) : dedup_mode(dedup_mode_), storage_id(storage_id_) { }
+    explicit DedupTask(const DedupMode & dedup_mode_, const StorageID & storage_id_, bool is_sub_task_ = false)
+        : dedup_mode(dedup_mode_), storage_id(storage_id_), is_sub_task(is_sub_task_)
+    {
+    }
+
+    String toString() const;
 };
 using DedupTaskPtr = std::shared_ptr<DedupTask>;
 
@@ -215,5 +290,17 @@ UInt64 getWriteLockTimeout(StorageCnchMergeTree & cnch_table, ContextPtr local_c
 void acquireLockAndFillDedupTask(StorageCnchMergeTree & cnch_table, DedupTask & dedup_task, CnchServerTransaction & txn, ContextPtr local_context);
 
 void executeDedupTask(StorageCnchMergeTree & cnch_table, DedupTask & dedup_task, const TxnTimestamp & txn_id, ContextPtr local_context);
+
+std::unordered_map<CnchWorkerClientPtr, DedupTaskPtr>
+pickWorkerForDedup(StorageCnchMergeTree & cnch_table, DedupTaskPtr dedup_task, const VirtualWarehouseHandle & vw_handle);
+
+/************Methods for partial update feature (Start)******************/
+
+String parseAndConvertColumnsIntoIndices(MergeTreeMetaBase & storage, const NamesAndTypesList & columns, const String & columns_name);
+
+/// Use index instead of name to reduce size
+void simplifyFunctionColumns(MergeTreeMetaBase & storage, const StorageMetadataPtr & metadata_snapshot, Block & block);
+
+/************Methods for partial update feature (End)******************/
 
 }

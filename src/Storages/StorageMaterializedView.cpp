@@ -102,7 +102,7 @@ StorageMaterializedView::StorageMaterializedView(
     , WithMutableContext(local_context->getGlobalContext())
     , refresh_schedule(query.refresh_strategy)
     , cache(MaterializedViewVersionedPartCache::getInstance())
-    , log(&Poco::Logger::get("StorageMaterializedView"))
+    , log(getLogger("StorageMaterializedView"))
 {
     StorageInMemoryMetadata storage_metadata;
     storage_metadata.setColumns(columns_);
@@ -1062,7 +1062,7 @@ void StorageMaterializedView::dropInnerTableIfAny(bool, ContextPtr)
             auto & txn_coordinator = getContext()->getCnchTransactionCoordinator();
             auto server_txn = txn_coordinator.createTransaction(CreateTransactionOption().setType(CnchTransactionType::Implicit));
             drop_context->setCurrentTransaction(server_txn);
-        }       
+        }
         InterpreterDropQuery(drop_query, drop_context).execute();
     }
 }
@@ -1116,8 +1116,8 @@ void StorageMaterializedView::alter(
     TableLockHolder &)
 {
     auto table_id = getStorageID();
-    StorageInMemoryMetadata new_metadata = getInMemoryMetadata();
-    StorageInMemoryMetadata old_metadata = getInMemoryMetadata();
+    StorageInMemoryMetadata new_metadata = getInMemoryMetadataCopy();
+    StorageInMemoryMetadata old_metadata = getInMemoryMetadataCopy();
     params.apply(new_metadata, local_context);
 
     /// start modify query
@@ -1464,14 +1464,14 @@ bool StorageMaterializedView::checkPartitionExpr(StoragePtr target_table, ASTPtr
     partition_expr->collectIdentifierNames(id_set);
     for (const auto & name : id_set)
     {
-        LOG_TRACE(&Poco::Logger::get("checkPartitionExpr"), "partition_expr name: {}", name);
+        LOG_TRACE(getLogger("checkPartitionExpr"), "partition_expr name: {}", name);
     }
 
     IdentifierNameSet id_set_target;
     partition_key.expression_list_ast->collectIdentifierNames(id_set_target);
     for (const auto & name : id_set_target)
     {
-        LOG_TRACE(&Poco::Logger::get("checkPartitionExpr"), "target table partition key name: {}", name);
+        LOG_TRACE(getLogger("checkPartitionExpr"), "target table partition key name: {}", name);
         if (id_set.count(name))
             return true;
     }
@@ -1497,7 +1497,7 @@ void StorageMaterializedView::refreshWhere(ASTPtr partition_expr, ContextMutable
     if (!cnch_select_table)
         throw Exception("Materialized view select table is not CnchMergeTree", ErrorCodes::LOGICAL_ERROR);
 
-    LOG_DEBUG(&Poco::Logger::get("refreshWhere"), "partition_expr: {}", serializeAST(*partition_expr));
+    LOG_DEBUG(getLogger("refreshWhere"), "partition_expr: {}", serializeAST(*partition_expr));
     if (!checkPartitionExpr(target_table, partition_expr, local_context))
         throw Exception("Refresh Materialized view without partition key", ErrorCodes::LOGICAL_ERROR);
 
@@ -1513,7 +1513,7 @@ void StorageMaterializedView::refreshWhere(ASTPtr partition_expr, ContextMutable
 
     SelectQueryInfo query_info = buildSelectQueryInfoForQuery(select_query, local_context);
 
-    auto required_partitions = cnch_select_table->getPrunedPartitions(query_info, column_names_to_return, local_context).partitions;
+    auto required_partitions = cnch_select_table->getPrunedPartitions(query_info, column_names_to_return, local_context, false).partitions;
 
     if (local_context->getSettingsRef().max_threads_to_refresh_by_partition > 1)
     {

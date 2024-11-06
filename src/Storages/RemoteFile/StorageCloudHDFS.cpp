@@ -49,7 +49,7 @@ std::unique_ptr<ReadBuffer> StorageCloudHDFS::FileBufferClient::createReadBuffer
 
 std::unique_ptr<WriteBuffer> StorageCloudHDFS::FileBufferClient::createWriteBuffer(const DB::String & file)
 {
-    return std::make_unique<WriteBufferFromHDFS>(file, query_context->getHdfsConnectionParams());
+    return std::make_unique<WriteBufferFromHDFS>(file, query_context->getHdfsConnectionParams(), DBMS_DEFAULT_BUFFER_SIZE, O_WRONLY, query_context->getSettingsRef().overwrite_current_file);
 }
 
 bool StorageCloudHDFS::FileBufferClient::exist(const DB::String & file)
@@ -94,7 +94,7 @@ void registerStorageCloudHDFS(StorageFactory & factory)
         CnchFileSettings settings = args.getContext()->getCnchFileSettings();
         settings.loadFromQuery(*args.storage_def);
         LOG_TRACE(
-            &Poco::Logger::get("StorageCloudHDFS"),
+            getLogger("StorageCloudHDFS"),
             fmt::format(
                 "create cloud hdfs table: database={}, table={}, url={}, format={}, compression={}",
                 database,

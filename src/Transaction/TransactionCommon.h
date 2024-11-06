@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <cstddef>
 #include <Core/Names.h>
 #include <Core/UUID.h>
@@ -144,7 +145,7 @@ struct UndoResource
     UInt64 id;
     Container pb_model;
 
-    Poco::Logger * log = &Poco::Logger::get("UndoResource");
+    LoggerPtr log = getLogger("UndoResource");
 
     /// pb_model.placeholders is a repeated field that hold resource info. Depending on the type,
     /// we have different interpretations of the resource info. Note that disk name is not a
@@ -154,7 +155,7 @@ struct UndoResource
     /// Part        | name           | relative_path  | null           |
     /// DeleteBitmap| name           | relative_path  | null           |
 
-    /// Becareful with the order of the `args`, don't change it unless you know what you are doing
+    /// Be careful with the order of the `args`, don't change it unless you know what you are doing
     template <typename... Args>
     UndoResource(TxnTimestamp txn_id_, UndoResourceType type_, Args&&... args) : txn_id(txn_id_.toUInt64())
     {

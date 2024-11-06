@@ -2,7 +2,6 @@ syntax = "proto2";
 package DB.Protos;
 
 import "data_models.proto";
-import "data_models_mv.proto";
 import "cnch_common.proto";
 import "auto_statistics.proto";
 
@@ -120,6 +119,7 @@ message CommitPartsReq {
 message CommitPartsResp {
   optional string exception = 1;
   optional uint64 commit_timestamp = 2;
+  optional uint32 dedup_impl_version = 3;
 }
 
 message SubmitPreloadTaskReq {
@@ -181,6 +181,7 @@ message FetchPartitionsReq {
   optional string predicate = 4;
   repeated string column_name_filter = 5;
   optional uint64 txnid = 6;
+  optional bool ignore_ttl = 7;
   optional TraceInfo trace_info = 255;
 }
 
@@ -284,6 +285,13 @@ message CleanTransactionReq {
 }
 
 message CleanTransactionResp { optional string exception = 1; }
+
+/// Called by CleanTransaction.
+message CleanUndoBuffersReq {
+  required DataModelTransactionRecord txn_record = 1;
+};
+
+message CleanUndoBuffersResp { optional string exception = 1; };
 
 message GetServerStartTimeReq {}
 
@@ -410,6 +418,7 @@ message RedirectAttachDetachedS3PartsReq {
   repeated DataModelDeleteBitmap bitmaps = 9;
   required uint32 detached_visible_part_size = 10;
   required uint32 detached_staged_part_size = 11;
+  optional uint64 txn_id = 12;
 }
 
 message RedirectAttachDetachedS3PartsResp { optional string exception = 1; }
@@ -427,6 +436,7 @@ message RedirectDetachAttachedS3PartsReq {
   repeated DataModelDeleteBitmap bitmaps = 10;
   repeated DetachMeta detached_part_metas = 11;
   repeated DetachMeta detached_bitmap_metas = 12;
+  optional uint64 txn_id = 13;
 }
 
 message RedirectDetachAttachedS3PartsResp { optional string exception = 1; }
@@ -456,6 +466,28 @@ message ExecuteOptimizeQueryReq {
 }
 
 message ExecuteOptimizeQueryResp { optional string exception = 1; }
+
+message SubmitBackupTaskReq {
+  required string id = 1;
+  required string command = 2;
+}
+
+message SubmitBackupTaskResp { optional string exception = 1; }
+
+message GetRunningBackupTaskReq {}
+
+message GetRunningBackupTaskResp {
+  optional string ret = 1;
+  optional string exception = 2;
+}
+
+message RemoveRunningBackupTaskReq {
+  required string id = 1;
+}
+
+message RemoveRunningBackupTaskResp {
+  optional string exception = 1;
+}
 
 message SubmitMaterializedMySQLDDLQueryReq {
   required string database_name = 1;
@@ -518,6 +550,21 @@ message handleRefreshTaskOnFinishResp
 {
   optional string exception = 1;
 }
+
+message GetDedupImplVersionReq
+{
+  required uint64 txn_id = 1;
+  required UUID uuid = 2;
+}
+
+message GetDedupImplVersionResp
+{
+  required uint32 version = 1;
+  optional string exception = 2;
+}
+
+message checkDelayInsertOrThrowIfNeededReq { required UUID storage_uuid = 1; }
+message checkDelayInsertOrThrowIfNeededResp { optional string exception = 1; }
 
 service CnchServerService {
   rpc reportTaskHeartbeat(ReportTaskHeartbeatReq)
@@ -583,6 +630,7 @@ service CnchServerService {
       returns(CommitWorkerRPCByKeyResp);
 
   rpc cleanTransaction(CleanTransactionReq) returns(CleanTransactionResp);
+  rpc cleanUndoBuffers(CleanUndoBuffersReq) returns(CleanUndoBuffersResp);
 
   rpc acquireLock(AcquireLockReq) returns(AcquireLockResp);
 
@@ -637,6 +685,15 @@ service CnchServerService {
   rpc executeOptimize(ExecuteOptimizeQueryReq)
       returns(ExecuteOptimizeQueryResp);
 
+  rpc submitBackupTask(SubmitBackupTaskReq)
+    returns(SubmitBackupTaskResp);
+
+  rpc getRunningBackupTask(GetRunningBackupTaskReq)
+    returns(GetRunningBackupTaskResp);
+
+  rpc removeRunningBackupTask(RemoveRunningBackupTaskReq)
+    returns(RemoveRunningBackupTaskResp);
+
   rpc submitPreloadTask(SubmitPreloadTaskReq) returns(SubmitPreloadTaskResp);
 
   rpc submitMaterializedMySQLDDLQuery(SubmitMaterializedMySQLDDLQueryReq)
@@ -658,4 +715,10 @@ service CnchServerService {
 
   rpc handleRefreshTaskOnFinish(handleRefreshTaskOnFinishReq) 
       returns (handleRefreshTaskOnFinishResp);
+
+  rpc getDedupImplVersion(GetDedupImplVersionReq)
+      returns (GetDedupImplVersionResp);
+  
+  rpc checkDelayInsertOrThrowIfNeeded(checkDelayInsertOrThrowIfNeededReq)
+    returns (checkDelayInsertOrThrowIfNeededResp);
 };

@@ -19,6 +19,11 @@
 #include <Disks/DiskType.h>
 #include <Disks/HDFS/DiskByteHDFS.h>
 #include <Disks/IO/AsynchronousBoundedReadBuffer.h>
+#include <IO/HDFSRemoteFSReader.h>
+#include <IO/PFRAWSReadBufferFromFS.h>
+#include <IO/ReadBufferFromNexusFS.h>
+#include <IO/Scheduler/IOScheduler.h>
+#include <IO/WSReadBufferFromFS.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/Context_fwd.h>
 #include <IO/Scheduler/IOScheduler.h>
@@ -195,6 +200,18 @@ void DiskByteHDFS::listFiles(const String & path, std::vector<String> & file_nam
 
 std::unique_ptr<ReadBufferFromFileBase> DiskByteHDFS::readFile(const String & path, const ReadSettings & settings) const
 {
+    if (unlikely(settings.remote_fs_read_failed_injection != 0))
+    {
+        if (settings.remote_fs_read_failed_injection == -1)
+            throw Exception("remote_fs_read_failed_injection is enabled and return error immediately", ErrorCodes::LOGICAL_ERROR);
+        else
+        {
+            LOG_TRACE(log, "remote_fs_read_failed_injection is enabled and will sleep {}ms", settings.remote_fs_read_failed_injection);
+            std::this_thread::sleep_for(std::chrono::milliseconds(settings.remote_fs_read_failed_injection));
+        }
+    }
+
+
     String file_path = absolutePath(path);
 
     if (IO::Scheduler::IOSchedulerSet::instance().enabled() && settings.enable_io_scheduler) {
@@ -220,12 +237,21 @@ std::unique_ptr<ReadBufferFromFileBase> DiskByteHDFS::readFile(const String & pa
     }
     else
     {
+        auto nexus_fs = settings.enable_nexus_fs ? Context::getGlobalContextInstance()->getNexusFS() : nullptr;
+        bool use_external_buffer = nexus_fs ? false : settings.remote_fs_prefetch;
         std::unique_ptr<ReadBufferFromFileBase> impl;
+        impl = std::make_unique<ReadBufferFromByteHDFS>(
+            file_path, hdfs_params, settings, nullptr, 0, use_external_buffer);
 
-        impl = std::make_unique<ReadBufferFromByteHDFS>(file_path, hdfs_params, settings,
-                nullptr, 0, /* use_external_buffer */ settings.remote_fs_prefetch);
-
-        if (settings.remote_fs_prefetch)
+        if (nexus_fs)
+        {
+            impl = std::make_unique<ReadBufferFromNexusFS>(
+                settings.local_fs_buffer_size,
+                settings.remote_fs_prefetch,
+                std::move(impl),
+                *nexus_fs);
+        }
+        else if (settings.remote_fs_prefetch)
         {
             auto global_context = Context::getGlobalContextInstance();
             auto reader = global_context->getThreadPoolReader();
@@ -239,8 +265,22 @@ std::unique_ptr<ReadBufferFromFileBase> DiskByteHDFS::readFile(const String & pa
 std::unique_ptr<WriteBufferFromFileBase> DiskByteHDFS::writeFile(const String & path, const WriteSettings & settings)
 {
     assertNotReadonly();
-    int write_mode = settings.mode == WriteMode::Append ? (O_APPEND | O_WRONLY) : O_WRONLY;
-    return std::make_unique<WriteBufferFromHDFS>(absolutePath(path), hdfs_params, settings.buffer_size, write_mode);
+    if (unlikely(settings.remote_fs_write_failed_injection != 0))
+    {
+        if (settings.remote_fs_write_failed_injection == -1)
+            throw Exception("remote_fs_write_failed_injection is enabled and return error immediately", ErrorCodes::LOGICAL_ERROR);
+        else
+        {
+            LOG_TRACE(log, "remote_fs_write_failed_injection is enabled and will sleep {}ms", settings.remote_fs_write_failed_injection);
+            std::this_thread::sleep_for(std::chrono::milliseconds(settings.remote_fs_write_failed_injection));
+        }
+    }
+
+    {
+        int write_mode = settings.mode == WriteMode::Append ? (O_APPEND | O_WRONLY) : O_WRONLY;
+        return std::make_unique<WriteBufferFromHDFS>(absolutePath(path), hdfs_params,
+                                                     settings.buffer_size, write_mode);
+    }
 }
 
 void DiskByteHDFS::removeFile(const String & path)

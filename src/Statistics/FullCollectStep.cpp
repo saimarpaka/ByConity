@@ -70,7 +70,7 @@ public:
 
         // to estimate ndv
         LOG_INFO(
-            &Poco::Logger::get("FirstFullColumnHandler"),
+            getLogger("FirstFullColumnHandler"),
             fmt::format(
                 FMT_STRING("col info: col={} && "
                            "sqls={}"),
@@ -113,7 +113,7 @@ public:
                     result.bucket_bounds = histogram->getBucketBounds(histogram_bucket_size);
                 }
                 LOG_INFO(
-                    &Poco::Logger::get("FirstFullColumnHandler"),
+                    getLogger("FirstFullColumnHandler"),
                     fmt::format(
                         FMT_STRING("col info: col={} && "
                                    "context raw data: full_count={} && "
@@ -233,8 +233,9 @@ public:
 
         auto sql = table_handler.getFullSql();
 
-        auto helper = SubqueryHelper::create(context, sql, true);
-        auto block = getOnlyRowFrom(helper);
+        auto query_context = SubqueryHelper::createQueryContext(context);
+        auto block = executeSubQueryWithOneRow(sql, query_context, false, false);
+
         table_handler.parse(block);
     }
 
@@ -260,8 +261,9 @@ public:
         }
         auto sql = table_handler.getFullSql();
 
-        auto helper = SubqueryHelper::create(context, sql, true);
-        auto block = getOnlyRowFrom(helper);
+        auto query_context = SubqueryHelper::createQueryContext(context);
+        auto block = executeSubQueryWithOneRow(sql, query_context, false, false);
+
         table_handler.parse(block);
     }
 

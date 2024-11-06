@@ -21,7 +21,8 @@
 
 #include <filesystem>
 #include <Interpreters/InterpreterInsertQuery.h>
-
+#include <CloudServices/CnchServerResource.h>
+#include <CloudServices/CnchWorkerResource.h>
 #include <Access/AccessFlags.h>
 #include <CloudServices/CnchServerResource.h>
 #include <Columns/ColumnNullable.h>
@@ -77,10 +78,7 @@
 #include <Common/LocalFilePathMatcher.h>
 #include <Common/S3FilePathMatcher.h>
 #include <Common/checkStackSize.h>
-#include "Interpreters/Context_fwd.h"
-#include <Databases/DatabasesCommon.h>
-#include <CloudServices/CnchWorkerResource.h>
-#include <CloudServices/CnchCreateQueryHelper.h>
+#include <Interpreters/Context_fwd.h>
 
 
 namespace DB
@@ -128,7 +126,7 @@ static NameSet genViewDependencyCreateQueries(StoragePtr storage, ContextPtr loc
         auto table = DatabaseCatalog::instance().tryGetTable(dependence, local_context);
         if (!table)
         {
-            LOG_WARNING(&Poco::Logger::get("InterpreterInsertQuery::genViewDependencyCreateQueries"), "table {} not found", dependence.getNameForLogs());
+            LOG_WARNING(getLogger("InterpreterInsertQuery::genViewDependencyCreateQueries"), "table {} not found", dependence.getNameForLogs());
             continue;
         }
 
@@ -139,7 +137,7 @@ static NameSet genViewDependencyCreateQueries(StoragePtr storage, ContextPtr loc
             auto target_table = DatabaseCatalog::instance().tryGetTable(mv->getTargetTableId(), local_context);
             if (!target_table)
             {
-                LOG_WARNING(&Poco::Logger::get("InterpreterInsertQuery::genViewDependencyCreateQueries"), "target table for {} not exist", mv->getStorageID().getNameForLogs());
+                LOG_WARNING(getLogger("InterpreterInsertQuery::genViewDependencyCreateQueries"), "target table for {} not exist", mv->getStorageID().getNameForLogs());
                 continue;
             }
 
@@ -147,7 +145,7 @@ static NameSet genViewDependencyCreateQueries(StoragePtr storage, ContextPtr loc
             auto * target_cnch_merge = dynamic_cast<StorageCnchMergeTree*>(target_table.get());
             if (!target_cnch_merge)
             {
-                LOG_WARNING(&Poco::Logger::get("InterpreterInsertQuery::genViewDependencyCreateQueries"), "table type not matched for {}, CnchMergeTree is expected",
+                LOG_WARNING(getLogger("InterpreterInsertQuery::genViewDependencyCreateQueries"), "table type not matched for {}, CnchMergeTree is expected",
                             target_table->getStorageID().getNameForLogs());
                 continue;
             }
@@ -185,7 +183,7 @@ StoragePtr InterpreterInsertQuery::getTable(ASTInsertQuery & query)
                 std::nullopt,
                 Strings{},
                 query.table_id.database_name);
-            LOG_TRACE(&Poco::Logger::get(__PRETTY_FUNCTION__), "Worker side create query: {}", create_query);
+            LOG_TRACE(getLogger(__PRETTY_FUNCTION__), "Worker side create query: {}", create_query);
 
             NameSet view_create_sqls = genViewDependencyCreateQueries(storage, getContext());
             if (!view_create_sqls.empty())
@@ -220,8 +218,37 @@ StoragePtr InterpreterInsertQuery::getTable(ASTInsertQuery & query)
     else
     {
         query.table_id = getContext()->resolveStorageID(query.table_id);
-        return DatabaseCatalog::instance().getTable(query.table_id, getContext());
+        auto storage = DatabaseCatalog::instance().tryGetTable(query.table_id, getContext());
+        if (storage)
+            return storage;
+
+        storage = tryGetTableInWorkerResource(query.table_id);
+        if (storage)
+            return storage;
+        throw Exception(ErrorCodes::UNKNOWN_TABLE, "Cannot find table {} in server", query.table_id.getNameForLogs());
     }
+}
+
+StoragePtr InterpreterInsertQuery::tryGetTableInWorkerResource(const StorageID & table_id)
+{
+    /// in some case of bitengine, server will write data into dict table and the targe table
+    /// can only be found in worker_resource
+    auto try_get_table_from_worker_resource = [&table_id](const auto & context) -> StoragePtr {
+        if (auto worker_resource = context->tryGetCnchWorkerResource(); worker_resource)
+            return worker_resource->getTable(table_id);
+        else
+            return nullptr;
+    };
+    auto storage = try_get_table_from_worker_resource(getContext());
+    if (storage)
+        return storage;
+    else if (auto query_context = getContext()->getQueryContext())
+    {
+        storage = try_get_table_from_worker_resource(query_context);
+        if (storage)
+            return storage;
+    }
+    return nullptr;
 }
 
 Block InterpreterInsertQuery::getSampleBlock(
@@ -362,7 +389,15 @@ BlockIO InterpreterInsertQuery::execute()
 
         auto txn = getContext()->getCurrentTransaction();
         txn->setMainTableUUID(table->getStorageUUID());
-        res.in = std::make_shared<TransactionWrapperBlockInputStream>(in, std::move(txn));
+
+        if (const auto * cnch_table = dynamic_cast<const StorageCnchMergeTree *>(table.get());
+            cnch_table && cnch_table->commitTxnInWriteSuffixStage(txn->getDedupImplVersion(getContext()), getContext()))
+        {
+            /// for unique table, insert select|infile is committed from worker side
+            res.in = std::move(in);
+        }
+        else
+            res.in = std::make_shared<TransactionWrapperBlockInputStream>(in, std::move(txn));
 
         if (insert_query.is_overwrite && !lock_holders.empty())
         {
@@ -387,7 +422,7 @@ BlockIO InterpreterInsertQuery::execute()
                 /// set worker group for select query
                 insert_select_context->initCnchServerResource(insert_select_context->getCurrentTransactionID());
                 LOG_DEBUG(
-                    &Poco::Logger::get("VirtualWarehouse"),
+                    getLogger("VirtualWarehouse"),
                     "Set worker group {} for table {}", worker_group->getQualifiedName(), cloud_table->getStorageID().getNameForLogs());
             }
 
@@ -449,7 +484,7 @@ BlockIO InterpreterInsertQuery::execute()
 
             res.pipeline.dropTotalsAndExtremes();
 
-            if (table->supportsParallelInsert() && settings.max_insert_threads > 1)
+            if (table->supportsParallelInsert(getContext()) && settings.max_insert_threads > 1)
                 out_streams_size = std::min(size_t(settings.max_insert_threads), res.pipeline.getNumStreams());
 
             res.pipeline.resize(out_streams_size);
@@ -592,7 +627,9 @@ BlockIO InterpreterInsertQuery::execute()
                 auto stream = std::move(out_streams.back());
                 out_streams.pop_back();
 
-                return std::make_shared<ProcessorToOutputStream>(std::move(stream));
+                auto res_stream = std::make_shared<ProcessorToOutputStream>(std::move(stream), "inserted_rows");
+                res_stream->setProgressCallback(this->getContext()->getProgressCallback());
+                return res_stream;
             });
         }
         else

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Common/Logger.h>
 #include <cstddef>
 #include <unordered_map>
 #include <unordered_set>
@@ -75,7 +76,6 @@ struct ExchangeStatuses
         return sink_statuses;
     }
 
-private:
     // Exchange status of each sink instance.
     std::vector<ExchangeStatus> sink_statuses;
 };
@@ -124,9 +124,10 @@ public:
     // Get the most locality-friendly addresses for specified partition range.
     std::vector<AddressInfo>
     getExchangeDataAddrs(PlanSegment * plan_segment, UInt64 start_parallel_index, UInt64 end_parallel_index, double locality_fraction);
+    size_t getExchangeDataSize(const String & query_id, UInt64 exchange_id) const;
+    const ExchangeStatuses & getExchangeStatusesRef(const String & query_id, UInt64 exchange_id) const;
 
 private:
-    ExchangeStatuses & getExchangeStatusesRef(const String & query_id, UInt64 exchange_id);
     // Unregister one exchange, this will delete related status data.
     void unregisterExchange(const String & query_id, UInt64 exchange_id);
 
@@ -135,7 +136,7 @@ private:
     std::unordered_map<const ExchangeKey, ExchangeStatuses, ExchangeKey::Hash> exchange_statuses;
     // Store all exchange ids for query, used to delete exchange statuses for a query.
     std::unordered_map<String, std::unordered_set<UInt64>> query_exchange_ids;
-    Poco::Logger * log = &Poco::Logger::get("ExchangeStatusTracker");
+    LoggerPtr log = getLogger("ExchangeStatusTracker");
 };
 
 using ExchangeStatusTrackerPtr = std::shared_ptr<ExchangeStatusTracker>;

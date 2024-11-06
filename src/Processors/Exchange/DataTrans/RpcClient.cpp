@@ -26,7 +26,7 @@ namespace DB
 {
 
 RpcClient::RpcClient(String host_port_, std::function<void()> report_err_, brpc::ChannelOptions * options)
-    : log(&Poco::Logger::get("RpcClient"))
+    : log(getLogger("RpcClient"))
     , host_port(std::move(host_port_))
     , report_err(std::move(report_err_))
     , brpc_channel(std::make_unique<brpc::Channel>())
@@ -55,9 +55,9 @@ void RpcClient::assertController(const brpc::Controller & cntl, int error_code)
     if (cntl.Failed())
     {
         auto err = cntl.ErrorCode();
-        if (err == ECONNREFUSED || err == ECONNRESET || err == ENOTCONN)
+        if (err == ECONNREFUSED || err == ECONNRESET)
             setOk(false);
-        else if (err == EHOSTDOWN || err == ENETUNREACH)
+        else if (err == EHOSTDOWN || err == ENETUNREACH || err == ENOTCONN)
             reportError();
         throw Exception(
             fmt::format("Fail to call {}, error code: {}, msg: {}", cntl.method()->full_name(), err, cntl.ErrorText()), error_code);

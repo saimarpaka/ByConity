@@ -16,6 +16,7 @@
 #pragma once
 
 
+#include <Common/Logger.h>
 #include <Core/Types.h>
 #include <Interpreters/CancellationCode.h>
 #include <Interpreters/DistributedStages/AddressInfo.h>
@@ -47,15 +48,19 @@ public:
     using Container = std::unordered_map<size_t, Element>;
 
     PlanSegmentGroup(
-        String initial_query_id_,
-        String coordinator_address_,
+        const String & initial_query_id_,
+        const String & coordinator_address_,
         Decimal64 initial_query_start_time_ms_,
         bool use_query_memory_tracker_,
-        size_t queue_bytes_)
+        size_t queue_bytes_,
+        const String & parent_initial_query_id_,
+        bool is_internal_query_)
         : initial_query_id(std::move(initial_query_id_))
         , coordinator_address(std::move(coordinator_address_))
         , initial_query_start_time_ms(initial_query_start_time_ms_)
         , use_query_memory_tracker(use_query_memory_tracker_)
+        , parent_initial_query_id(parent_initial_query_id_)
+        , is_internal_query(is_internal_query_)
     {
         if (queue_bytes_ != 0)
             memory_controller = std::make_shared<MemoryController>(queue_bytes_);
@@ -82,9 +87,6 @@ public:
     bool emplace_null(std::vector<size_t> segment_ids)
     {
         std::unique_lock lock(mutex);
-        // for batch mode
-        if (segment_ids.size() != 1 && !segment_queries.empty())
-            return false;
 
         for (const auto segment_id : segment_ids)
         {
@@ -113,6 +115,9 @@ public:
 
     bool tryCancel(bool internal);
 
+    void addChildQuery(const String & child_initial_query_id);
+    std::set<String> getChildrenQuery();
+
     mutable bthread::Mutex mutex;
     String initial_query_id;
     String coordinator_address;
@@ -124,6 +129,10 @@ public:
     MemoryTracker memory_tracker{VariableContext::Process};
     // for all planSegment
     std::shared_ptr<MemoryController> memory_controller = nullptr;
+    // support subquery, for children to add itself into parent
+    String parent_initial_query_id;
+    std::set<String> children_initial_query_id;
+    bool is_internal_query = false;
 };
 
 using PlanSegmentGroupPtr = std::shared_ptr<PlanSegmentGroup>;
@@ -170,8 +179,7 @@ public:
 
     std::vector<EntryPtr> insertGroup(ContextMutablePtr query_context, std::vector<size_t> & segment_ids, bool force = false);
 
-    void insertProcessList(
-        EntryPtr plan_segment_process_entry, const PlanSegment & plan_segment, ContextMutablePtr query_context, bool force = false);
+    void insertProcessList(EntryPtr plan_segment_process_entry, size_t segment_id, ContextMutablePtr query_context, bool force = false);
 
     CancellationCode tryCancelPlanSegmentGroup(const String & initial_query_id, String coordinator_address = "");
 
@@ -180,6 +188,10 @@ public:
     size_t size() const { return initail_query_to_groups.size(); }
 
 private:
+    PlanSegmentGroupPtr getGroup(const String & initial_query_id) const;
+
+    bool tryCascadeCancel(PlanSegmentGroupPtr segment_group, bool internal);
+
     using Container = phmap::parallel_flat_hash_map<
         std::string,
         PlanSegmentGroupPtr,
@@ -191,7 +203,7 @@ private:
     Container initail_query_to_groups;
     mutable bthread::Mutex mutex;
     mutable bthread::ConditionVariable remove_group;
-    Poco::Logger * logger = &Poco::Logger::get("PlanSegmentProcessList");
+    LoggerPtr logger = getLogger("PlanSegmentProcessList");
 };
 
 }

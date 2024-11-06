@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Common/Logger.h>
 #include <unordered_map>
 #include "Common/config.h"
 #if USE_HIVE
@@ -25,18 +26,17 @@ public:
         BlockInfo(const Block & header_, const StorageMetadataPtr & metadata_);
         Block getHeader() const;
 
-        Block header;           /// physical columns + partition columns
+        Block header;           /// physical columns + partition columns + virtual columns
         Block physical_header;  /// physical columns
 
         StorageMetadataPtr metadata;
         std::unordered_map<String, size_t> partition_name_to_index;
-        bool all_partition_column = false; /// whether only partition columns present
     };
     using BlockInfoPtr = std::shared_ptr<BlockInfo>;
 
     struct Allocator
     {
-        explicit Allocator(HiveFiles files_);
+        explicit Allocator(HiveFiles && files_);
 
         /// next file slice to read from
         HiveFilePtr next() const;
@@ -72,10 +72,12 @@ private:
     HiveFilePtr hive_file;
     SourcePtr data_source;
     SharedParsingThreadPoolPtr shared_pool;
+    const bool need_only_count;
+
     std::shared_ptr<IHiveFile::ReadParams> read_params;
     std::unique_ptr<QueryPipeline> pipeline;
     std::unique_ptr<PullingPipelineExecutor> reader;
-    Poco::Logger * log {&Poco::Logger::get("StorageHiveSource")};
+    LoggerPtr log {getLogger("StorageHiveSource")};
 };
 
 }

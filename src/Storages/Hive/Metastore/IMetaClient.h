@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Common/config.h"
+#include "Storages/Hive/CnchHiveSettings.h"
 #if USE_HIVE
 
 #include "Core/Types.h"
@@ -27,7 +28,9 @@ public:
     IMetaClient() = default;
     virtual ~IMetaClient() = default;
 
+    virtual void getConfigValue(std::string & value, const std::string & name, const std::string & defaultValue);
     virtual Strings getAllDatabases() = 0;
+    virtual std::shared_ptr<ApacheHive::Database> getDatabase(const String & db_name);
     virtual Strings getAllTables(const String & db_name) = 0;
     virtual std::shared_ptr<ApacheHive::Table> getTable(const String & db_name, const String & table_name) = 0;
     virtual bool isTableExist(const String & db_name, const String & table_name) = 0;
@@ -40,6 +43,16 @@ public:
 };
 using IMetaClientPtr = std::shared_ptr<IMetaClient>;
 
+class LakeMetaClientFactory
+{
+public:
+    LakeMetaClientFactory() = delete;
+    static std::shared_ptr<IMetaClient> create(const String & name, const std::shared_ptr<CnchHiveSettings> & settings);
+};
+
+
+
 }
+
 
 #endif

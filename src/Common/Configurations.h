@@ -23,8 +23,6 @@ namespace DB
     M(UInt64, init_client_tries, "", 3, ConfigFlag::Default, "") \
     M(UInt64, init_client_retry_interval_ms, "", 3000, ConfigFlag::Default, "") \
     M(UInt64, max_retry_times, "", 3, ConfigFlag::Default, "") \
-    M(String, resource_coordinate_mode, "", "None", ConfigFlag::Default, "None, Sharing, Scaling.") \
-    M(UInt64, resource_coordinate_task_interval_ms, "", 5000, ConfigFlag::Default, "") \
     M(UInt64, worker_register_visible_granularity_sec, "", 5, ConfigFlag::Default, "change workers' state from Registering to Running every N seconds to avoid changing worker topology frequently.") \
     M(UInt64, worker_heartbeat_timeout_sec, "", 6, ConfigFlag::Default, "RM will mark a worker as outdated if don't receive its heartbeat in this timeout. And outdated workers will be removed periodcally.") \
 
@@ -138,7 +136,12 @@ struct BSPConfiguration final : public BSPConfigurationData
     M(UInt64, max_async_query_threads, "", 5000, ConfigFlag::Default, "Maximum threads that async queries use.") \
     M(UInt64, async_query_status_ttl, "", 86400, ConfigFlag::Default, "TTL for async query status stored in catalog, in seconds.") \
     M(UInt64, async_query_expire_time, "", 3600, ConfigFlag::Default, "Expire time for async query, in seconds.") \
-    M(UInt64, async_query_status_check_period, "", 15 * 60, ConfigFlag::Default, "Cycle for checking expired async query status stored in catalog, in seconds.") \
+    M(UInt64, \
+      async_query_status_check_period, \
+      "", \
+      15 * 60, \
+      ConfigFlag::Default, \
+      "Cycle for checking expired async query status stored in catalog, in seconds.") \
     M(Bool, enable_cnch_write_remote_catalog, "", true, ConfigFlag::Default, "Set to false to disable writing catalog") \
     M(Bool, enable_cnch_write_remote_disk, "", true, ConfigFlag::Default, "set to false to disable writing data") \
     /**
@@ -161,12 +164,14 @@ struct BSPConfiguration final : public BSPConfigurationData
     M(UInt64, ginindex_store_cache_shard, "", 2, ConfigFlag::Default, "") \
     M(UInt64, ginindex_store_cache_ttl, "", 60, ConfigFlag::Default, "") \
     M(UInt64, ginindex_store_cache_lru_update_interval, "", 60, ConfigFlag::Default, "In seconds") \
+    M(UInt64, ginindex_store_cache_sst_block_cache_size, "", 5UL * 1024 * 1024 * 1024, ConfigFlag::Default, "") \
     M(UInt64, intermediate_result_cache_size, "", 1UL * 1024 * 1024 * 1024, ConfigFlag::Default, "") \
     M(UInt64, mark_cache_size, "", 5UL * 1024 * 1024 * 1024, ConfigFlag::Default, "") \
     M(UInt64, mmap_cache_size, "", 1000, ConfigFlag::Default, "") \
     M(UInt64, unique_key_index_data_cache_size, "", 1UL * 1024 * 1024 * 1024, ConfigFlag::Default, "") \
     M(UInt64, unique_key_index_meta_cache_size, "", 1UL * 1024 * 1024 * 1024, ConfigFlag::Default, "") \
     M(UInt64, uncompressed_cache_size, "", 0, ConfigFlag::Default, "") \
+    M(Bool, enable_uncompressed_cache_shard_mode, "", false, ConfigFlag::Default, "") \
     /**
      * Cache default size max ratio */ \
     M(Float32, bitengine_memory_cache_size_default_max_ratio, "", 0.15, ConfigFlag::Default, "") \
@@ -185,7 +190,7 @@ struct BSPConfiguration final : public BSPConfigurationData
     /**
      * Mutable */ \
     M(MutableUInt64, max_server_memory_usage, "", 0, ConfigFlag::Default, "") \
-    M(MutableFloat32, max_server_memory_usage_to_ram_ratio, "", 0.8, ConfigFlag::Default, "") \
+    M(MutableFloat32, max_server_memory_usage_to_ram_ratio, "", 0.9, ConfigFlag::Default, "") \
     M(MutableUInt64, kafka_max_partition_fetch_bytes, "", 1048576, ConfigFlag::Default, "") \
     M(MutableUInt64, stream_poll_timeout_ms, "", 500, ConfigFlag::Default, "") \
     M(MutableUInt64, debug_disable_merge_mutate_thread, "", false, ConfigFlag::Default, "") \

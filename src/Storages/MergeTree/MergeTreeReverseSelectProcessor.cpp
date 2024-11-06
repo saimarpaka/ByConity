@@ -42,6 +42,11 @@ try
         finish();
         return false;
     }
+    if (is_first_task)
+    {
+        firstTaskInitialization();
+    }
+    is_first_task = false;
 
     /// We have some blocks to return in buffer.
     /// Return true to continue reading, but actually don't create a task.
@@ -63,7 +68,7 @@ try
         : std::make_unique<MergeTreeBlockSizePredictor>(part_detail.data_part, ordered_names, storage_snapshot->metadata->getSampleBlock());
 
     task = std::make_unique<MergeTreeReadTask>(
-        part_detail.data_part, getDeleteBitmap(), mark_ranges_for_task, part_detail.part_index_in_query, ordered_names, column_name_set,
+        part_detail.data_part, delete_bitmap, mark_ranges_for_task, part_detail.part_index_in_query, ordered_names, column_name_set,
         task_columns, prewhere_info && prewhere_info->remove_prewhere_column,
         task_columns.should_reorder, std::move(size_predictor), part_detail.ranges);
 

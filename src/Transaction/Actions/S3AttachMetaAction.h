@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Storages/MergeTree/IMergeTreeDataPart_fwd.h>
 #include <Transaction/Actions/IAction.h>
 #include <Transaction/TransactionCommon.h>
@@ -65,6 +66,8 @@ public:
     static void collectUndoResourcesForCommit(const UndoResources & resources, UndoResourceNames & resource_names);
     static void abortByUndoBuffer(const Context & ctx, const StoragePtr & tbl, const UndoResources & resources);
 
+    void setFromAttach() { from_attach = true; }
+
 private:
     StoragePtr from_tbl;
     StoragePtr to_tbl;
@@ -79,8 +82,9 @@ private:
     DeleteBitmapMetaPtrVector bitmaps;
 
     bool executed{false};
+    bool from_attach{false};
 
-    Poco::Logger * log{&Poco::Logger::get("S3AttachMetaAction")};
+    LoggerPtr log{getLogger("S3AttachMetaAction")};
 };
 
 }

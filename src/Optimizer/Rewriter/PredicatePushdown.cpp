@@ -19,6 +19,7 @@
 #include <Analyzers/TypeAnalyzer.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/getLeastSupertype.h>
+#include <Interpreters/Context_fwd.h>
 #include <Interpreters/join_common.h>
 #include <Optimizer/DomainTranslator.h>
 #include <Optimizer/EqualityInference.h>
@@ -29,6 +30,7 @@
 #include <Optimizer/PredicateConst.h>
 #include <Optimizer/PredicateUtils.h>
 #include <Optimizer/ProjectionPlanner.h>
+#include <Optimizer/Rule/Rewrite/SimplifyExpressionRules.h>
 #include <Optimizer/RuntimeFilterUtils.h>
 #include <Optimizer/SimplifyExpressions.h>
 #include <Optimizer/SymbolUtils.h>
@@ -38,6 +40,7 @@
 #include <Parsers/ASTLiteral.h>
 #include <Parsers/ASTTablesInSelectQuery.h>
 #include <Parsers/formatAST.h>
+#include <Parsers/queryToString.h>
 #include <QueryPlan/ArrayJoinStep.h>
 #include <QueryPlan/FilterStep.h>
 #include <QueryPlan/JoinStep.h>
@@ -46,7 +49,6 @@
 #include <QueryPlan/SymbolMapper.h>
 #include <QueryPlan/UnionStep.h>
 #include <Common/FieldVisitorConvertToNumber.h>
-#include <Parsers/ASTLiteral.h>
 
 namespace DB
 {
@@ -55,7 +57,7 @@ namespace ErrorCodes
     extern const int PLAN_BUILD_ERROR;
 }
 
-void PredicatePushdown::rewrite(QueryPlan & plan, ContextMutablePtr context) const
+bool PredicatePushdown::rewrite(QueryPlan & plan, ContextMutablePtr context) const
 {
     auto cte_reference_counts = plan.getCTEInfo().collectCTEReferenceCounts(plan.getPlanNode());
     PredicateVisitor visitor{pushdown_filter_into_cte, simplify_common_filter, context, plan.getCTEInfo(), cte_reference_counts};
@@ -63,6 +65,7 @@ void PredicatePushdown::rewrite(QueryPlan & plan, ContextMutablePtr context) con
         .predicate = PredicateConst::TRUE_VALUE, .extra_predicate_for_simplify_outer_join = PredicateConst::TRUE_VALUE, .context = context};
     auto result = VisitorUtil::accept(plan.getPlanNode(), visitor, predicate_context);
     plan.update(result);
+    return true;
 }
 
 PlanNodePtr PredicateVisitor::visitPlanNode(PlanNodeBase & node, PredicateContext & predicate_context)
@@ -155,7 +158,7 @@ PlanNodePtr PredicateVisitor::visitProjectionNode(ProjectionNode & node, Predica
 
     auto pushdown_predicate = PredicateUtils::combineConjuncts(inlined_deterministic_conjuncts);
     LOG_DEBUG(
-        &Poco::Logger::get("PredicateVisitor"),
+        getLogger("PredicateVisitor"),
         "project node {}, pushdown_predicate : {}",
         node.getId(),
         pushdown_predicate->formatForErrorMessage());
@@ -195,12 +198,11 @@ PlanNodePtr PredicateVisitor::visitFilterNode(FilterNode & node, PredicateContex
     std::pair<ConstASTPtr, ConstASTPtr> split_in_filter = FilterStep::splitLargeInValueList(step.getFilter(), limit);
 
     LOG_DEBUG(
-        &Poco::Logger::get("PredicateVisitor"),
+        getLogger("PredicateVisitor"),
         "filter node {}, split_in_filter.first : {}, split_in_filter.second : {}",
         node.getId(),
         split_in_filter.first->formatForErrorMessage(),
-        split_in_filter.second->formatForErrorMessage()
-        );
+        split_in_filter.second->formatForErrorMessage());
 
     auto predicates = std::vector<ConstASTPtr>{split_in_filter.first, predicate_context.predicate};
     ConstASTPtr predicate = PredicateUtils::combineConjuncts(predicates);
@@ -210,7 +212,11 @@ PlanNodePtr PredicateVisitor::visitFilterNode(FilterNode & node, PredicateContex
         predicate = CommonPredicatesRewriter::rewrite(predicate, context);
     }
 
-    LOG_DEBUG(&Poco::Logger::get("PredicateVisitor"), "filter node {}, pushdown_predicate : {}", node.getId(), predicate->formatForErrorMessage());
+    LOG_DEBUG(
+        getLogger("PredicateVisitor"),
+        "filter node {}, pushdown_predicate : {}",
+        node.getId(),
+        predicate->formatForErrorMessage());
 
     PredicateContext filter_context{
         .predicate = predicate,
@@ -347,7 +353,7 @@ PlanNodePtr PredicateVisitor::visitAggregatingNode(AggregatingNode & node, Predi
 
 PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & predicate_context)
 {
-    ConstASTPtr & inherited_predicate = predicate_context.predicate;
+    ConstASTPtr inherited_predicate = CommonPredicatesRewriter::rewrite(predicate_context.predicate, context, true);
     auto step = node.getStep();
 
     // RequireRightKeys is clickhouse sql only, we don't process this kind of join.
@@ -394,7 +400,7 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
     ASTTableJoin::Kind kind = step->getKind();
 
     LOG_DEBUG(
-        &Poco::Logger::get("PredicateVisitor"),
+        getLogger("PredicateVisitor"),
         "join node {}, inherited_predicate : {}, left effective predicate: {} , right effective predicate: {}, join_predicate : {}",
         node.getId(),
         inherited_predicate->formatForErrorMessage(),
@@ -505,25 +511,37 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
     ConstASTPtr left_implicit_filter = PredicateConst::TRUE_VALUE;
     ConstASTPtr right_implicit_filter = PredicateConst::TRUE_VALUE;
 
+    auto build_implicit_filter = [](const Names & join_keys) {
+        std::vector<ConstASTPtr> conjuncts;
+
+        for (const auto & key : join_keys)
+        {
+            conjuncts.push_back(makeASTFunction("isNotNull", std::make_shared<ASTIdentifier>(key)));
+        }
+
+        return PredicateUtils::combineConjuncts(conjuncts);
+    };
     // TODO: broaden this by consider SEMI JOIN & ANTI JOIN
     if (isRegularJoin(*step))
     {
-        auto build_implicit_filter = [](const Names & join_keys) {
-            std::vector<ConstASTPtr> conjuncts;
-
-            for (const auto & key : join_keys)
-            {
-                conjuncts.push_back(makeASTFunction("isNotNull", std::make_shared<ASTIdentifier>(key)));
-            }
-
-            return PredicateUtils::combineConjuncts(conjuncts);
-        };
-
         if (!isLeftOrFull(step->getKind()))
             left_implicit_filter = build_implicit_filter(step->getLeftKeys());
 
         if (!isRightOrFull(step->getKind()))
             right_implicit_filter = build_implicit_filter(step->getRightKeys());
+    }
+
+    if (kind == ASTTableJoin::Kind::Cross && !join_clauses.empty() /*inner join*/)
+    {
+        Names left_keys;
+        Names right_keys;
+        for (const auto & item : join_clauses)
+        {
+            left_keys.emplace_back(item.first);
+            right_keys.emplace_back(item.second);
+        }
+        left_implicit_filter = build_implicit_filter(left_keys);
+        right_implicit_filter = build_implicit_filter(right_keys);
     }
 
     // TODO: combine join implicit filter with inherited extra_predicate_for_simplify_outer_join
@@ -535,6 +553,13 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
         .context = predicate_context.context};
     PlanNodePtr left_source;
     PlanNodePtr right_source;
+
+    LOG_DEBUG(
+        &Poco::Logger::get("PredicateVisitor"),
+        "join node {}, left context: {}, right context: {}",
+        node.getId(),
+        left_predicate->formatForErrorMessage(),
+        right_predicate->formatForErrorMessage());
 
     bool join_clauses_unmodified = PredicateUtils::isJoinClauseUnmodified(join_clauses, step->getLeftKeys(), step->getRightKeys());
     if (!join_clauses_unmodified)
@@ -591,15 +616,15 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
 
     auto left_header = left_data_stream.header;
     auto right_header = right_data_stream.header;
-    NamesAndTypes output;
-    for (const auto & item : left_header)
-    {
-        output.emplace_back(item.name, item.type);
-    }
-    for (const auto & item : right_header)
-    {
-        output.emplace_back(item.name, item.type);
-    }
+    NamesAndTypes output = step->getOutputStream().header.getNamesAndTypes();
+    // for (const auto & item : left_header)
+    // {
+    //     output.emplace_back(NameAndTypePair{item.name, item.type});
+    // }
+    // for (const auto & item : right_header)
+    // {
+    //     output.emplace_back(NameAndTypePair{item.name, item.type});
+    // }
 
     // cast extracted join keys to super type
     Names left_keys;
@@ -608,6 +633,7 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
         ProjectionPlanner left_planner(left_source_expression_node, context);
         ProjectionPlanner right_planner(right_source_expression_node, context);
         const bool allow_extended_type_conversion = context->getSettingsRef().allow_extended_type_conversion;
+        const bool enable_implicit_arg_type_convert = context->getSettingsRef().enable_implicit_arg_type_convert;
         bool need_project = false;
 
         for (const auto & clause : join_clauses)
@@ -619,7 +645,19 @@ PlanNodePtr PredicateVisitor::visitJoinNode(JoinNode & node, PredicateContext & 
 
             if (!JoinCommon::isJoinCompatibleTypes(left_type, right_type))
             {
-                auto common_type = getLeastSupertype(DataTypes{left_type, right_type}, allow_extended_type_conversion);
+                DataTypePtr common_type;
+                try
+                {
+                    common_type
+                        = getCommonType(DataTypes{left_type, right_type}, enable_implicit_arg_type_convert, allow_extended_type_conversion);
+                }
+                catch (DB::Exception & ex)
+                {
+                    throw Exception(
+                        "Type mismatch of columns to JOIN by: " + left_type->getName() + " at left, " + right_type->getName()
+                            + " at right. " + "Can't get supertype: " + ex.message(),
+                        ErrorCodes::TYPE_MISMATCH);
+                }
                 left_key = left_planner.addColumn(makeCastFunction(std::make_shared<ASTIdentifier>(left_key), common_type)).first;
                 right_key = right_planner.addColumn(makeCastFunction(std::make_shared<ASTIdentifier>(right_key), common_type)).first;
                 need_project = true;
@@ -1407,7 +1445,8 @@ void PredicateVisitor::tryNormalizeOuterToInnerJoin(JoinNode & node, const Const
         return;
 
     // TODO: ANTI JOINs also can be optimized
-    if (strictness != Strictness::All && strictness != Strictness::Any)
+    // left any join CANNOT be converted to inner any join
+    if (strictness != Strictness::All)
         return;
 
     auto column_types = step.getOutputStream().header.getNamesToTypes();

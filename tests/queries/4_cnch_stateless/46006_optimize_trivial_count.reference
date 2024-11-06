@@ -35,8 +35,11 @@ Projection
 optimized:
 Projection
 └─ Union
-   ├─ ReadStorageRowCount
-   └─ ReadStorageRowCount
+   ├─ CTERef[1]
+   └─ CTERef[1]
+CTEDef [1]
+   ReadStorageRowCount
+note: CTE(Common Table Expression) is applied for 2 times.
 optimized:
 Projection
 └─ ReadStorageRowCount
@@ -46,41 +49,47 @@ Projection
    └─ Gather Exchange
       └─ Aggregating
          └─ Filter
-            └─ TableScan test.test46006
+            └─ TableScan default.test46006
 non-optimized:
 Projection
-└─ MergingAggregated
-   └─ Gather Exchange
-      └─ Aggregating
-         └─ Filter
-            └─ TableScan test.test46006
+└─ ReadStorageRowCount
 non-optimized:
 Projection
 └─ Gather Exchange
    └─ MergingAggregated
       └─ Repartition Exchange
          └─ Aggregating
-            └─ TableScan test.test46006
+            └─ TableScan default.test46006
 non-optimized:
 Projection
 └─ MergingAggregated
    └─ Gather Exchange
       └─ Aggregating
          └─ Left Join
-            ├─ TableScan test.test46006
+            ├─ TableScan default.test46006
             └─ Broadcast Exchange
-               └─ TableScan test.test46006
+               └─ TableScan default.test46006
 Projection
 └─ MergingAggregated
    └─ Gather Exchange
       └─ Aggregating
          └─ Filter
             └─ Projection
-               └─ TableScan test.test46006
+               └─ TableScan default.test46006
 Projection
 └─ MergingAggregated
    └─ Gather Exchange
       └─ Aggregating
          └─ Filter
             └─ Projection
-               └─ TableScan test.test46006
+               └─ TableScan default.test46006
+Projection
+└─ Union
+   ├─ MergingAggregated
+   │  └─ Gather Exchange
+   │     └─ Aggregating
+   │        └─ Filter
+   │           └─ TableScan default.test46006
+   └─ ReadStorageRowCount
+3
+0

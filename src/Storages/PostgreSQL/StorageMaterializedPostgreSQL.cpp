@@ -111,7 +111,7 @@ StorageMaterializedPostgreSQL::StorageMaterializedPostgreSQL(StoragePtr nested_s
     , nested_context(makeNestedTableContext(context_->getGlobalContext()))
     , nested_table_id(nested_storage_->getStorageID())
 {
-    setInMemoryMetadata(nested_storage_->getInMemoryMetadata());
+    setInMemoryMetadata(nested_storage_->getInMemoryMetadataCopy());
 }
 
 
@@ -126,7 +126,7 @@ StoragePtr StorageMaterializedPostgreSQL::createTemporary() const
     auto tmp_storage = DatabaseCatalog::instance().tryGetTable(tmp_table_id, nested_context);
     if (tmp_storage)
     {
-        LOG_TRACE(&Poco::Logger::get("MaterializedPostgreSQLStorage"), "Temporary table {} already exists, dropping", tmp_table_id.getNameForLogs());
+        LOG_TRACE(getLogger("MaterializedPostgreSQLStorage"), "Temporary table {} already exists, dropping", tmp_table_id.getNameForLogs());
         InterpreterDropQuery::executeDropQuery(ASTDropQuery::Kind::Drop, getContext(), getContext(), tmp_table_id, /* no delay */true);
     }
 
@@ -203,7 +203,7 @@ std::shared_ptr<Context> StorageMaterializedPostgreSQL::makeNestedTableContext(C
 StoragePtr StorageMaterializedPostgreSQL::prepare()
 {
     auto nested_table = getNested();
-    setInMemoryMetadata(nested_table->getInMemoryMetadata());
+    setInMemoryMetadata(nested_table->getInMemoryMetadataCopy());
     has_nested.store(true);
     return nested_table;
 }

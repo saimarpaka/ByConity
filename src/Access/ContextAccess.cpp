@@ -55,6 +55,11 @@ namespace
 
         /// "numbers", "numbers_mt", "zeros", "zeros_mt" were excluded because they can generate lots of values and
         /// that can decrease performance in some cases.
+        /// We limit the number of values to 100K for multiple tenants case
+        "numbers",
+        "numbers_mt",
+        "zeros",
+        "zeros_mt",
 
         "contributors",
         "licenses",
@@ -77,6 +82,7 @@ namespace
         "columns",
         "mutations",
         "users",
+        "dictionaries",
 
         /// Specific to the current session
         "settings",
@@ -85,12 +91,20 @@ namespace
         "quota_usage",
         "processes",
 
+        /// parts related
+        "parts",
+        "detached_parts",
+        "projection_parts",
+        "parts_columns",
+        "projection_parts_columns",
+
         /// The following tables hide some rows if the current user doesn't have corresponding SHOW privileges.
         /// For IDE tools to get schema info
         "cnch_databases",
         "cnch_tables",
         "cnch_columns",
         "cnch_parts",
+        "cnch_parts_info",
         "data_skipping_indices",
         "external_catalogs",
         "external_tables",
@@ -343,7 +357,7 @@ void ContextAccess::setUser(const UserPtr & user_) const
     }
 
     user_name = user->getName();
-    trace_log = &Poco::Logger::get("ContextAccess (" + user_name + ")");
+    trace_log = getLogger("ContextAccess (" + user_name + ")");
 
     std::vector<UUID> current_roles, current_roles_with_admin_option;
 

@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Protos/DataModelHelpers.h>
 #include <Storages/MergeTree/MergeTreeDataPartCNCH.h>
 #include <Transaction/Actions/IAction.h>
@@ -69,6 +70,8 @@ public:
 
     CnchDedupHelper::DedupTaskPtr getDedupTask() const;
 
+    void setFromAttach() { from_attach = true; }
+
 private:
     const StoragePtr table;
     MutableMergeTreeDataPartsCNCHVector parts;
@@ -77,7 +80,8 @@ private:
     CnchDedupHelper::DedupMode dedup_mode = CnchDedupHelper::DedupMode::APPEND;
 
     bool executed{false};
-    Poco::Logger * log{&Poco::Logger::get("InsertAction")};
+    bool from_attach{false};
+    LoggerPtr log{getLogger("InsertAction")};
     UInt64 * block_id = nullptr;
 };
 

@@ -20,6 +20,7 @@
  */
 
 #pragma once
+#include <Common/Logger.h>
 #include <DataStreams/IBlockInputStream.h>
 #include <Storages/MergeTree/MergeTreeThreadSelectBlockInputProcessor.h>
 #include <MergeTreeCommon/MergeTreeMetaBase.h>
@@ -48,7 +49,7 @@ public:
         bool check_columns_,
         const MergeTreeStreamSettings & stream_settings_,
         const Names & virt_column_names_ = {},
-        bool quiet = false);
+        const MarkRangesFilterCallback& range_filter_callback_ = {});
 
     ~MergeTreeSelectProcessor() override;
 
@@ -60,8 +61,9 @@ public:
 protected:
 
     bool getNewTask() override;
-
-    ImmutableDeleteBitmapPtr getDeleteBitmap();
+    /// Do extra mark range filter, row filter generation and delete bitmap
+    /// initialize
+    void firstTaskInitialization();
 
     /// Used by Task
     Names required_columns;
@@ -75,8 +77,9 @@ protected:
     RangesInDataPart part_detail;
     MergeTreeMetaBase::DeleteBitmapGetter delete_bitmap_getter;
     /// Lazy init, need to use getDeleteBitmap() interface rather than use delete_bitmap directly
-    ImmutableDeleteBitmapPtr delete_bitmap;
-    bool delete_bitmap_initialized = false;
+    DeleteBitmapPtr delete_bitmap;
+
+    MarkRangesFilterCallback mark_ranges_filter_callback;
 
     /// Total number of marks we should read
     size_t total_marks_count = 0;
@@ -84,7 +87,7 @@ protected:
     bool check_columns;
     bool is_first_task = true;
 
-    Poco::Logger * log = &Poco::Logger::get("MergeTreeSelectProcessor");
+    LoggerPtr log = getLogger("MergeTreeSelectProcessor");
 };
 
 }

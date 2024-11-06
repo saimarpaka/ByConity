@@ -46,6 +46,7 @@
 #include <Common/FieldVisitorToString.h>
 
 #include <Common/DateLUT.h>
+#include <DataTypes/DataTypeJsonb.h>
 #include <DataTypes/DataTypeAggregateFunction.h>
 
 
@@ -485,6 +486,11 @@ Field convertFieldToTypeImpl(const Field & src, const IDataType & type, const ID
             return object;
         }
     }
+    else if (const DataTypeJsonb * jsonb_type = dynamic_cast<const DataTypeJsonb *>(&type))
+    {
+        if (src.getType() == Field::Types::JSONB)
+            return src;
+    }
 
     /// Conversion from string by parsing.
     if (src.getType() == Field::Types::String)
@@ -500,7 +506,10 @@ Field convertFieldToTypeImpl(const Field & src, const IDataType & type, const ID
         }
 
         const auto col = type_to_parse->createColumn();
-        ReadBufferFromString in_buffer(src.get<String>());
+        // Check if src is an empty string, if so, use "0"
+        const auto & src_str = src.safeGet<String>();
+        const auto str = src_str.empty() ? "0" : src_str;
+        ReadBufferFromString in_buffer(str);
         try
         {
             type_to_parse->getDefaultSerialization()->deserializeWholeText(*col, in_buffer, FormatSettings{});

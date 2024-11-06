@@ -199,7 +199,7 @@ namespace
     }
 
 
-    AccessEntityPtr tryReadEntityFile(const String & file_path, Poco::Logger & log)
+    AccessEntityPtr tryReadEntityFile(const String & file_path, LoggerPtr log)
     {
         try
         {
@@ -207,7 +207,7 @@ namespace
         }
         catch (...)
         {
-            tryLogCurrentException(&log, "Could not parse " + file_path);
+            tryLogCurrentException(log, "Could not parse " + file_path);
             return nullptr;
         }
     }
@@ -221,7 +221,6 @@ namespace
         queries.push_back(InterpreterShowCreateAccessEntityQuery::getAttachQuery(entity));
         if ((entity.getType() == EntityType::USER) || (entity.getType() == EntityType::ROLE))
         {
-            /* The true/false order must be kept, to be used for detecting sensitive tenant in KVAccessStorage.cpp */
             boost::range::push_back(queries, InterpreterShowGrantsQuery::getAttachGrantQueries(entity, true));
             boost::range::push_back(queries, InterpreterShowGrantsQuery::getAttachGrantQueries(entity, false));
         }
@@ -560,7 +559,7 @@ bool DiskAccessStorage::rebuildLists()
             continue;
 
         const auto access_entity_file_path = getEntityFilePath(directory_path, id);
-        auto entity = tryReadEntityFile(access_entity_file_path, *getLogger());
+        auto entity = tryReadEntityFile(access_entity_file_path, getLogger());
         if (!entity)
             continue;
 

@@ -282,6 +282,10 @@ static void checkAccessRightsForSelect(
     const StorageMetadataPtr & table_metadata,
     const TreeRewriterResult & syntax_analyzer_result)
 {
+    // firstly, check aeolus access
+    if (context->getServerType() == ServerType::cnch_server)
+        context->checkAeolusTableAccess(table_id.database_name, table_id.table_name);
+
     if (!syntax_analyzer_result.has_explicit_columns && table_metadata && !table_metadata->getColumns().empty())
     {
         /// For a trivial query like "SELECT count() FROM table" access is granted if at least
@@ -334,7 +338,7 @@ InterpreterSelectQuery::InterpreterSelectQuery(
     , storage(storage_)
     , input(input_)
     , input_pipe(std::move(input_pipe_))
-    , log(&Poco::Logger::get("InterpreterSelectQuery"))
+    , log(getLogger("InterpreterSelectQuery"))
     , metadata_snapshot(metadata_snapshot_)
 {
     checkStackSize();
@@ -622,7 +626,8 @@ InterpreterSelectQuery::InterpreterSelectQuery(
         required_columns = syntax_analyzer_result->requiredSourceColumns();
 
         // disable map column access if not explcit set to avoid "select *" query
-        if (storage && storage->supportsMapImplicitColumn() && !settings.allow_map_access_without_key && query_analyzer->hasByteMapColumn())
+        if (storage && storage->supportsMapImplicitColumn() && (!settings.allow_map_access_without_key && !settings.enable_optimizer)
+            && query_analyzer->hasByteMapColumn())
             throw Exception("Map column access without key is not allowed for ByteMap", ErrorCodes::NOT_IMPLEMENTED);
 
         if (storage)
@@ -716,7 +721,7 @@ InterpreterSelectQuery::InterpreterSelectQuery(
 
     if (query_info.projection)
         storage_snapshot->addProjection(query_info.projection->desc);
-    
+
     LOG_TRACE(log, "query: " + queryToString(query));
     std::ostringstream ostr;
     for (auto & c : required_columns)
@@ -2107,6 +2112,10 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
 
         if (!query.prewhere() && !query.where() && !query_info.partition_filter && atomic_predicates_expr.empty())
         {
+            /// Some storages can optimize trivial count in read() method instead of totalRows() because it still can
+            /// require reading some data (but much faster than reading columns).
+            /// Set a special flag in query info so the storage will see it and optimize count in read() method.
+            query_info.optimize_trivial_count = true;
             num_rows = storage->totalRows(context);
         }
         else // It's possible to optimize count() given only partition predicates
@@ -2119,6 +2128,7 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
                 temp_query_info.partition_filter = query_info.partition_filter->clone();
             temp_query_info.atomic_predicates_expr = atomic_predicates_expr;
 
+            query_info.optimize_trivial_count = true; /// see comment above
             num_rows = storage->totalRowsByPartitionPredicate(temp_query_info, context);
         }
 
@@ -2385,7 +2395,6 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
         if (!query_plan.isInitialized())
         {
             auto header = storage_snapshot->getSampleBlockForColumns(required_columns);
-
             /// add bitmap index result column for null source
             if (auto * bitmap_index_info = dynamic_cast<BitmapIndexInfo *>(query_analyzer->getIndexContext()->get(MergeTreeIndexInfo::Type::BITMAP).get()))
             {
@@ -2890,7 +2899,7 @@ void InterpreterSelectQuery::executeDistinct(QueryPlan & query_plan, bool before
         SizeLimits limits(settings.max_rows_in_distinct, settings.max_bytes_in_distinct, settings.distinct_overflow_mode);
 
         auto distinct_step
-            = std::make_unique<DistinctStep>(query_plan.getCurrentDataStream(), limits, limit_for_distinct, columns, pre_distinct);
+            = std::make_unique<DistinctStep>(query_plan.getCurrentDataStream(), limits, limit_for_distinct, columns, pre_distinct, true);
 
         if (pre_distinct)
             distinct_step->setStepDescription("Preliminary DISTINCT");

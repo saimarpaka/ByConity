@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Common/Logger.h>
 #include <Storages/DataPart_fwd.h>
 #include <Storages/IStorage.h>
 #include <Storages/RemoteFile/CnchFileCommon.h>
@@ -58,8 +59,6 @@ public:
 
     virtual void loadDataParts(FileDataPartsCNCHVector & file_parts);
 
-    virtual void tryUpdateFSClient(const ContextPtr & /*context*/) { }
-
     FileClientPtr client;
     Strings file_list;
 
@@ -70,7 +69,7 @@ public:
     FileDataPartsCNCHVector parts{};
 
 private:
-    Poco::Logger * log = &Poco::Logger::get("IStorageCloudFile");
+    LoggerPtr log = getLogger("IStorageCloudFile");
 };
 
 }

@@ -235,6 +235,8 @@ struct SelectQueryInfo
     /// Read from local table
     bool read_local_table = true;
 
+    bool optimize_trivial_count = false;
+
     /// predicate ast
     std::vector<ASTPtr> atomic_predicates_expr;
     /// atomic predicate, may > predicate ast
@@ -286,4 +288,7 @@ const std::deque<AtomicPredicatePtr> & getAtomicPredicates(const SelectQueryInfo
 MergeTreeIndexContextPtr getIndexContext(const SelectQueryInfo & query_info);
 
 TableScanCacheInfo getTableScanCacheInfo(const SelectQueryInfo & query_info);
+
+ASTPtr rewriteSampleForDistributedTable(const ASTPtr & query_ast, size_t shard_size);
+
 }

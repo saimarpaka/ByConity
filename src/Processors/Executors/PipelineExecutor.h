@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Processors/IProcessor.h>
 #include <Processors/Executors/PollingQueue.h>
 #include <Processors/Executors/ThreadsQueue.h>
@@ -76,7 +77,7 @@ public:
     const ExecutingGraphPtr & getExecutingGraph() const { return graph; }
 
     /// Cancel execution. May be called from another thread.
-    void cancel();
+    void cancel(bool has_exception = false);
 
     /// Checks the query time limits (cancelled or timeout). Throws on cancellation or when time limit is reached and the query uses "break"
     bool checkTimeLimit();
@@ -131,7 +132,7 @@ private:
     std::atomic_bool cancelled;
     std::atomic_bool finished;
 
-    Poco::Logger * log = &Poco::Logger::get("PipelineExecutor");
+    LoggerPtr log = getLogger("PipelineExecutor");
 
     /// Things to stop execution to expand pipeline.
     struct ExpandPipelineTask

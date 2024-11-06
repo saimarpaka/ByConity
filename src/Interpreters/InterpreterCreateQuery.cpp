@@ -76,6 +76,7 @@
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/ObjectUtils.h>
 #include <DataTypes/DataTypeBitMap64.h>
+#include <DataTypes/hasNullable.h>
 
 #include <Databases/DatabaseFactory.h>
 #include <Databases/DatabaseReplicated.h>
@@ -91,19 +92,19 @@
 #include <Interpreters/FunctionNameNormalizer.h>
 #include <Interpreters/ApplyWithSubqueryVisitor.h>
 
-#include <TableFunctions/TableFunctionFactory.h>
-#include <common/logger_useful.h>
+#include <DataStreams/BlockIO.h>
 #include <DataTypes/ObjectUtils.h>
-#include <Parsers/queryToString.h>
-#include <Interpreters/executeQuery.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/executeQuery.h>
+#include <Interpreters/executeSubQuery.h>
 #include <Interpreters/trySetVirtualWarehouse.h>
+#include <Parsers/ASTForeignKeyDeclaration.h>
+#include <Parsers/ASTUniqueNotEnforcedDeclaration.h>
+#include <Parsers/queryToString.h>
 #include <Storages/StorageCnchMergeTree.h>
 #include <TableFunctions/TableFunctionFactory.h>
 #include <Transaction/TransactionCoordinatorRcCnch.h>
-#include <Parsers/ASTForeignKeyDeclaration.h>
-#include <Parsers/ASTUniqueNotEnforcedDeclaration.h>
+#include <common/logger_useful.h>
 
 #include <Catalog/Catalog.h>
 #include <ExternalCatalog/IExternalCatalogMgr.h>
@@ -486,6 +487,11 @@ ASTPtr InterpreterCreateQuery::formatColumns(const ColumnsDescription & columns,
             column_declaration->default_expression = column.default_desc.expression->clone();
         }
 
+        if (column.on_update_expression)
+        {
+            column_declaration->on_update_expression = column.on_update_expression->clone();
+        }
+
         if (!column.comment.empty())
         {
             column_declaration->comment = std::make_shared<ASTLiteral>(Field(column.comment));
@@ -562,11 +568,17 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
      *  mixed with conversion-columns for each explicitly specified type */
 
     ASTPtr default_expr_list = std::make_shared<ASTExpressionList>();
+    ASTPtr on_update_expr_list = std::make_shared<ASTExpressionList>();
     NamesAndTypesList column_names_and_types;
     /// Only applies default nullable transform if:
     /// 1. The query is not a system query, such as: system.query_log, system.query_thread_log
     /// 2. The query is to create a new table rather than attaching an existed table.
     bool make_columns_nullable = !system && !attach && context_->getSettingsRef().data_type_default_nullable;
+    auto getDefaultExpression = [](ASTPtr expression) {
+        auto identifier = expression->as<ASTIdentifier>();
+        bool use_now = identifier && Poco::toUpper(identifier->name()) == "CURRENT_TIMESTAMP";
+        return use_now ? makeASTFunction("now64") : expression->clone();
+    };
 
     for (const auto & ast : columns_ast.children)
     {
@@ -599,6 +611,21 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
             {
                 column_type = JoinCommon::convertTypeToNullable(column_type);
             }
+            else if (!hasNullable(column_type) &&
+                     col_decl.default_specifier == "DEFAULT" &&
+                     col_decl.default_expression &&
+                     col_decl.default_expression->as<ASTLiteral>() &&
+                     col_decl.default_expression->as<ASTLiteral>()->value.isNull())
+            {
+                if (column_type->lowCardinality())
+                {
+                    const auto * low_cardinality_type = typeid_cast<const DataTypeLowCardinality *>(column_type.get());
+                    assert(low_cardinality_type);
+                    column_type = std::make_shared<DataTypeLowCardinality>(makeNullable(low_cardinality_type->getDictionaryType()));
+                }
+                else
+                    column_type = makeNullable(column_type);
+            }
 
             column_names_and_types.emplace_back(col_decl.name, column_type);
         }
@@ -611,6 +638,7 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
         /// add column to postprocessing if there is a default_expression specified
         if (col_decl.default_expression)
         {
+            auto default_expression = getDefaultExpression(col_decl.default_expression);
             /** For columns with explicitly-specified type create two expressions:
               * 1. default_expression aliased as column name with _tmp suffix
               * 2. conversion of expression (1) to explicitly-specified type alias as column name
@@ -627,11 +655,38 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
 
                 default_expr_list->children.emplace_back(
                     setAlias(
-                        col_decl.default_expression->clone(),
+                        default_expression,
                         tmp_column_name));
             }
             else
-                default_expr_list->children.emplace_back(setAlias(col_decl.default_expression->clone(), col_decl.name));
+                default_expr_list->children.emplace_back(setAlias(default_expression, col_decl.name));
+        }
+
+        /// add column to postprocessing if there is a on_update_expr_list specified
+        if (col_decl.on_update_expression)
+        {
+            auto on_update_expression = getDefaultExpression(col_decl.on_update_expression);
+            /** For columns with explicitly-specified type create two expressions:
+              * 1. on_update_expression aliased as column name with _tmp suffix
+              * 2. conversion of expression (1) to explicitly-specified type alias as column name
+              */
+            if (col_decl.type)
+            {
+                const auto & final_column_name = col_decl.name;
+                const auto tmp_column_name = final_column_name + "_tmp_alter" + toString(randomSeed());
+                const auto * data_type_ptr = column_names_and_types.back().type.get();
+
+                on_update_expr_list->children.emplace_back(
+                    setAlias(addTypeConversionToAST(std::make_shared<ASTIdentifier>(tmp_column_name), data_type_ptr->getName()),
+                        final_column_name));
+
+                on_update_expr_list->children.emplace_back(
+                    setAlias(
+                        on_update_expression,
+                        tmp_column_name));
+            }
+            else
+                on_update_expr_list->children.emplace_back(setAlias(on_update_expression, col_decl.name));
         }
 
         // Set type flags based on information in AST
@@ -639,9 +694,12 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
     }
 
     Block defaults_sample_block;
+    Block on_update_sample_block;
     /// set missing types and wrap default_expression's in a conversion-function if necessary
     if (!default_expr_list->children.empty())
         defaults_sample_block = validateColumnsDefaultsAndGetSampleBlock(default_expr_list, column_names_and_types, context_);
+    if (!on_update_expr_list->children.empty())
+        on_update_sample_block = validateColumnsDefaultsAndGetSampleBlock(on_update_expr_list, column_names_and_types, context_);
 
     bool sanity_check_compression_codecs = !attach && !context_->getSettingsRef().allow_suspicious_codecs;
     bool allow_experimental_codecs = attach || context_->getSettingsRef().allow_experimental_codecs;
@@ -658,7 +716,7 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
 
         if (col_decl.default_expression)
         {
-            ASTPtr default_expr = col_decl.default_expression->clone();
+            ASTPtr default_expr = getDefaultExpression(col_decl.default_expression);
             if (col_decl.type)
                 column.type = name_type_it->type;
             else
@@ -675,6 +733,11 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
             column.type = name_type_it->type;
         else
             throw Exception();
+
+        if (col_decl.on_update_expression)
+        {
+            column.on_update_expression = getDefaultExpression(col_decl.on_update_expression);
+        }
 
         if (col_decl.comment)
             column.comment = col_decl.comment->as<ASTLiteral &>().value.get<String>();
@@ -1148,19 +1211,40 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
         throw Exception("`Projection` cannot be used together with `UNIQUE KEY`", ErrorCodes::BAD_ARGUMENTS);
 
     /// If user execute 'CREATE TABLE' with query-level setting `virtual_warehouse_write`, we will pass the value to table setting cnch_vw_write if it's not set.
-    if (auto vw_in_query_settings = getContext()->getSettingsRef().virtual_warehouse_write.value; !vw_in_query_settings.empty())
+    if (create.storage && create.storage->engine && startsWith(create.storage->engine->name, "Cnch")
+        && endsWith(create.storage->engine->name, "MergeTree"))
     {
-        auto * storage_settings = create.storage->settings;
-        if (!storage_settings)
+        if (auto vw_in_query_settings = getContext()->getSettingsRef().virtual_warehouse_write.value; !vw_in_query_settings.empty())
         {
-            ASTPtr single_setting = std::make_shared<ASTSetQuery>();
-            single_setting->as<ASTSetQuery &>().is_standalone = false;
-            single_setting->as<ASTSetQuery &>().changes.push_back({"cnch_vw_write", vw_in_query_settings}); 
-            create.storage->set(create.storage->settings, single_setting);
+            auto * storage_settings = create.storage->settings;
+            if (!storage_settings)
+            {
+                ASTPtr single_setting = std::make_shared<ASTSetQuery>();
+                single_setting->as<ASTSetQuery &>().is_standalone = false;
+                single_setting->as<ASTSetQuery &>().changes.push_back({"cnch_vw_write", vw_in_query_settings});
+                create.storage->set(create.storage->settings, single_setting);
+            }
+            else if (!storage_settings->changes.tryGet("cnch_vw_write"))
+            {
+                storage_settings->changes.setSetting("cnch_vw_write", vw_in_query_settings);
+            }
         }
-        else if (!storage_settings->changes.tryGet("cnch_vw_write"))
+
+        /// If user execute 'CREATE TABLE' with query-level setting `storage_policy`, we will pass the value to table setting storage_policy if it's not set.
+        if (auto storage_policy_setting = getContext()->getSettingsRef().storage_policy.value; !storage_policy_setting.empty())
         {
-            storage_settings->changes.setSetting("cnch_vw_write", vw_in_query_settings);
+            auto * storage_settings = create.storage->settings;
+            if (!storage_settings)
+            {
+                ASTPtr single_setting = std::make_shared<ASTSetQuery>();
+                single_setting->as<ASTSetQuery &>().is_standalone = false;
+                single_setting->as<ASTSetQuery &>().changes.push_back({"storage_policy", storage_policy_setting});
+                create.storage->set(create.storage->settings, single_setting);
+            }
+            else if (!storage_settings->changes.tryGet("storage_policy"))
+            {
+                storage_settings->changes.setSetting("storage_policy", storage_policy_setting);
+            }
         }
     }
 
@@ -1237,7 +1321,7 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
     }
     else if (create.attach && !create.attach_short_syntax && getContext()->getClientInfo().query_kind != ClientInfo::QueryKind::SECONDARY_QUERY)
     {
-        auto * log = &Poco::Logger::get("InterpreterCreateQuery");
+        auto log = getLogger("InterpreterCreateQuery");
         LOG_WARNING(log, "ATTACH TABLE query with full table definition is not recommended: "
                          "use either ATTACH TABLE {}; to attach existing table "
                          "or CREATE TABLE {} <table definition>; to create new table "
@@ -1423,7 +1507,7 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
         return doCreateOrReplaceTable(create, properties);
 
     /// when create materialized view and tenant id is not empty add setting tenant_id to select query
-    if (create.is_materialized_view && create.refresh_strategy && (create.refresh_strategy->schedule_kind == RefreshScheduleKind::ASYNC || 
+    if (create.is_materialized_view && create.refresh_strategy && (create.refresh_strategy->schedule_kind == RefreshScheduleKind::ASYNC ||
         create.refresh_strategy->schedule_kind == RefreshScheduleKind::MANUAL) && !getCurrentTenantId().empty())
     {
         ASTPtr settings = std::make_shared<ASTSetQuery>();
@@ -1589,7 +1673,7 @@ bool InterpreterCreateQuery::doCreateTable(ASTCreateQuery & create,
 
     try
     {
-        res->checkColumnsValidity(properties.columns);
+        res->checkMetadataValidity(properties.columns);
     }
     catch (...)
     {
@@ -1688,7 +1772,7 @@ BlockIO InterpreterCreateQuery::doCreateOrReplaceTable(ASTCreateQuery & create,
 
 BlockIO InterpreterCreateQuery::fillTableIfNeeded(const ASTCreateQuery & create)
 {
-    /// If the query is a CREATE SELECT, insert the data into the table via INSERT INTO ... SELECT FROM
+    /// If the query is a CREATE SELECT, insert the data into the table via INSERT INTO ... SELECT
     if (create.select && !create.attach && !create.is_ordinary_view && !create.is_live_view
         && (!create.is_materialized_view || create.is_populate))
     {
@@ -1707,27 +1791,12 @@ BlockIO InterpreterCreateQuery::fillTableIfNeeded(const ASTCreateQuery & create)
         }
         else
         {
-            /// reuse the query context for INSERT instead of creating a new context,
-            /// because we want the outermost executeQuery to finish the INSERT txn rather than the DDL txn
-            auto insert_context = getContext()->getQueryContext();
-            auto & coordinator = insert_context->getCnchTransactionCoordinator();
-            if (insert_context->getCurrentTransaction())
-            {
-                /// finish the last txn (for DDL) and create a new one for INSERT
-                insert_context->setCurrentTransaction(coordinator.createTransaction());
-            }
+            auto insert_context = createContextForSubQuery(getContext(), "insert");
+            if (!insert_context->getSettingsRef().enable_optimizer_for_create_select)
+                insert_context->setSetting("enable_optimizer", false);
 
-            bool is_internal = true;
-            // TODO @wangtao.2077: review this when internal queries are fully supported by optimizer
-            if (insert_context->getSettingsRef().enable_optimizer && insert_context->getSettingsRef().enable_optimizer_for_create_select)
-            {
-                /// optimizer doesn't support internal query
-                is_internal = false;
-                /// in order to add the insert query to processlist, need to allocate a new query id
-                insert_context->setCurrentQueryId("");
-            }
-
-            return executeQuery(insert->formatForErrorMessage(), insert_context, is_internal);
+            executeSubQueryWithoutResult(insert->formatForErrorMessage(), insert_context, false);
+            return {};
         }
     }
 
@@ -1791,7 +1860,21 @@ BlockIO InterpreterCreateQuery::execute()
         return executeDDLQueryOnCluster(query_ptr, getContext(), getRequiredAccess());
     }
 
-    getContext()->checkAccess(getRequiredAccess());
+    auto context = getContext();
+    context->checkAccess(getRequiredAccess());
+    if (create.is_dictionary && context->is_tenant_user())
+    {
+        if (create.dictionary)
+        {
+            auto& refresh_query = create.dictionary->clickhouse_query;
+            auto& invalidate_query = create.dictionary->clickhouse_invalidate_query;
+            if (!refresh_query.empty())
+                executeQuery("explain " + refresh_query, context, true);
+            if (!invalidate_query.empty())
+                executeQuery(invalidate_query, context, true);
+        }
+
+    }
 
     ASTQueryWithOutput::resetOutputASTIfExist(create);
 
@@ -1823,6 +1906,17 @@ AccessRightsElements InterpreterCreateQuery::getRequiredAccess() const
     else if (create.is_dictionary)
     {
         required_access.emplace_back(AccessType::CREATE_DICTIONARY, create.database, create.table);
+        if (create.dictionary)
+        {
+            auto & db = create.dictionary->clickhouse_db;
+            auto & tb = create.dictionary->clickhouse_tb;
+            if (!db.empty() && !tb.empty())
+            {
+                auto context = getContext();
+                if (context->is_tenant_user())
+                    required_access.emplace_back(AccessType::SELECT, db, tb);
+            }
+        }
     }
     else if (create.isView())
     {

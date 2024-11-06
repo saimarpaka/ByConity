@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Core/Block.h>
 
 #include <IO/WriteBufferFromFile.h>
@@ -65,7 +66,7 @@ public:
     // use dest_policy_ to reserve space if specificed
     explicit MergeTreeDataWriter(MergeTreeMetaBase & data_, IStorage::StorageLocation location = IStorage::StorageLocation::MAIN):
         data(data_), write_location(location),
-        log(&Poco::Logger::get(data.getLogName() + " (Writer)")) {}
+        log(getLogger(data.getLogName() + " (Writer)")) {}
 
     /** Split the block to blocks, each of them must be written as separate part.
       *  (split rows by partition)
@@ -80,15 +81,26 @@ public:
       */
     MergeTreeMetaBase::MutableDataPartPtr writeTempPart(BlockWithPartition & block, const StorageMetadataPtr & metadata_snapshot, bool optimize_on_insert);
 
+    MergeTreeMetaBase::MutableDataPartPtr writeTempPart(
+        BlockWithPartition & block,
+        const StorageMetadataPtr & metadata_snapshot,
+        ContextPtr context,
+        UInt64 block_id = 0,
+        Int64 mutation = 0,
+        Int64 hint_mutation = 0,
+        bool enable_partial_update = false);
+
+    /// For partial update mode: write partial part with certain columns
+    /// XXX: Currently the entire block with all columns has been regenerated, needs to be optimized later
     MergeTreeMetaBase::MutableDataPartPtr
-    writeTempPart(BlockWithPartition & block, const StorageMetadataPtr & metadata_snapshot, ContextPtr context, UInt64 block_id = 0, Int64 mutation = 0, Int64 hint_mutation = 0);
+    writeTempPartialUpdatePart(Block & block, const StorageMetadataPtr & metadata_snapshot, ContextPtr context, const IMergeTreeDataPartPtr & source_part);
 
     MergeTreeMetaBase::MutableDataPartPtr writeProjectionPart(
         Block block, const ProjectionDescription & projection, const IMergeTreeDataPart * parent_part);
 
     static MergeTreeMetaBase::MutableDataPartPtr writeTempProjectionPart(
         MergeTreeMetaBase & data,
-        Poco::Logger * log,
+        LoggerPtr log,
         Block block,
         const ProjectionDescription & projection,
         const IMergeTreeDataPart * parent_part,
@@ -100,7 +112,7 @@ public:
 private:
     static MergeTreeMetaBase::MutableDataPartPtr writeProjectionPartImpl(
         MergeTreeMetaBase & data,
-        Poco::Logger * log,
+        LoggerPtr log,
         Block block,
         const StorageMetadataPtr & metadata_snapshot,
         MergeTreeMetaBase::MutableDataPartPtr && new_data_part);
@@ -109,7 +121,7 @@ private:
 
     IStorage::StorageLocation write_location;
 
-    Poco::Logger * log;
+    LoggerPtr log;
 };
 
 }

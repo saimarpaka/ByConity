@@ -19,6 +19,7 @@
 #    include "config_core.h"
 #endif
 
+#include <Common/Logger.h>
 #include <MergeTreeCommon/GlobalGCManager.h>
 #include <Interpreters/Context_fwd.h>
 #include <Protos/cnch_server_rpc.pb.h>
@@ -185,6 +186,12 @@ public:
         Protos::CleanTransactionResp * response,
         google::protobuf::Closure * done) override;
 
+    void cleanUndoBuffers(
+        google::protobuf::RpcController * cntl,
+        const Protos::CleanUndoBuffersReq * request,
+        Protos::CleanUndoBuffersResp * response,
+        google::protobuf::Closure * done) override;
+
     void acquireLock(
         google::protobuf::RpcController * cntl,
         const Protos::AcquireLockReq * request,
@@ -329,6 +336,24 @@ public:
         Protos::ExecuteOptimizeQueryResp * response,
         google::protobuf::Closure * done) override;
 
+    void submitBackupTask(
+        google::protobuf::RpcController * cntl,
+        const Protos::SubmitBackupTaskReq * request,
+        Protos::SubmitBackupTaskResp * response,
+        google::protobuf::Closure * done) override;
+
+    void getRunningBackupTask(
+        google::protobuf::RpcController * cntl,
+        const Protos::GetRunningBackupTaskReq * request,
+        Protos::GetRunningBackupTaskResp * response,
+        google::protobuf::Closure * done) override;
+
+    void removeRunningBackupTask(
+        google::protobuf::RpcController * cntl,
+        const Protos::RemoveRunningBackupTaskReq * request,
+        Protos::RemoveRunningBackupTaskResp * response,
+        google::protobuf::Closure * done) override;
+
     void notifyAccessEntityChange(
         google::protobuf::RpcController *,
         const Protos::notifyAccessEntityChangeReq * request,
@@ -379,10 +404,22 @@ public:
         Protos::notifyTableCreatedResp * response,
         google::protobuf::Closure * done) override;
 
+    void getDedupImplVersion(
+        google::protobuf::RpcController * cntl,
+        const Protos::GetDedupImplVersionReq * request,
+        Protos::GetDedupImplVersionResp * response,
+        google::protobuf::Closure * done) override;
+
+    void checkDelayInsertOrThrowIfNeeded(
+        google::protobuf::RpcController * cntl,
+        const Protos::checkDelayInsertOrThrowIfNeededReq * request,
+        Protos::checkDelayInsertOrThrowIfNeededResp * response,
+        google::protobuf::Closure * done) override;
+
 private:
     const UInt64 server_start_time;
     std::optional<GlobalGCManager> global_gc_manager;
-    Poco::Logger * log;
+    LoggerPtr log;
 };
 
 REGISTER_SERVICE_IMPL(CnchServerServiceImpl);

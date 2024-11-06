@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include <folly/fibers/TimedMutex.h>
 
@@ -10,6 +11,11 @@
 #include <Storages/DiskCache/Types.h>
 #include <common/defines.h>
 #include <common/types.h>
+
+namespace DB::NexusFSComponents
+{
+class BlockHandle;
+}
 
 namespace DB::HybridCache
 {
@@ -117,6 +123,7 @@ public:
 
     // Reads from attached buffer from offset.
     void readFromBuffer(UInt32 from_offset, MutableBufferView out_buf) const;
+    void readFromBuffer(UInt32 from_offset, size_t size, char *to) const;
 
     // Attach buffer to the region.
     void attachBuffer(std::unique_ptr<Buffer> && buf)
@@ -181,6 +188,10 @@ public:
     // Returns the region id.
     RegionId id() const { return region_id; }
 
+    void addHandle(std::shared_ptr<NexusFSComponents::BlockHandle> &handle);
+    void resetHandles();
+    void getHandles(std::vector<std::shared_ptr<NexusFSComponents::BlockHandle>> &handles_);
+
 private:
     UInt32 activeOpenLocked() const;
 
@@ -211,6 +222,8 @@ private:
     UInt32 last_entry_end_offset{0};
     UInt32 num_items{0};
     std::unique_ptr<Buffer> buffer{nullptr};
+
+    std::vector<std::shared_ptr<NexusFSComponents::BlockHandle>> handles;
 
     mutable TimedMutex lock{TimedMutex::Options(false)};
     mutable ConditionVariable cond;

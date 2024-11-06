@@ -54,7 +54,7 @@ static BlockIO tryToExecuteQuery(const String & query_to_execute, ContextMutable
     catch (...)
     {
         tryLogCurrentException(
-            &Poco::Logger::get("MaterializeMySQLSyncThread(" + database + ")"),
+            getLogger("MaterializeMySQLSyncThread(" + database + ")"),
             "Query " + query_to_execute + " wasn't finished successfully");
         throw;
     }
@@ -89,7 +89,7 @@ MaterializeMySQLSyncThread::MaterializeMySQLSyncThread(
     MaterializeMySQLSettings * settings_,
     const String & assigned_table)
     : WithContext(context_->getGlobalContext())
-    , log(&Poco::Logger::get("MaterializedMySQLSyncThread (" + database_name_ + ") "))
+    , log(getLogger("MaterializedMySQLSyncThread (" + database_name_ + ") "))
     , database_name(database_name_)
     , mysql_database_name(mysql_database_name_)
     , assigned_materialized_table(assigned_table)
@@ -263,8 +263,8 @@ getTableOutput(const String & database_name, const String & table_name, ContextM
     const StoragePtr & storage = DatabaseCatalog::instance().getTable(StorageID(database_name, table_name), query_context);
 
     WriteBufferFromOwnString insert_columns_str;
-    const StorageInMemoryMetadata & storage_metadata = storage->getInMemoryMetadata();
-    const ColumnsDescription & storage_columns = storage_metadata.getColumns();
+    auto storage_metadata = storage->getInMemoryMetadataPtr();
+    const ColumnsDescription & storage_columns = storage_metadata->getColumns();
     const NamesAndTypesList & insert_columns_names = storage_columns.getOrdinary();
 
 
@@ -765,7 +765,7 @@ void MaterializeMySQLSyncThread::Buffers::prepareCommit(ContextMutablePtr query_
     if (!server_client)
         throw Exception("Failed to get ServerClient", ErrorCodes::LOGICAL_ERROR);
 
-    LOG_TRACE(&Poco::Logger::get("MaterializedMySQLSyncThread"), "Try to commit buffer data to server: {}", server_client->getRPCAddress());
+    LOG_TRACE(getLogger("MaterializedMySQLSyncThread"), "Try to commit buffer data to server: {}", server_client->getRPCAddress());
     /// set rpc info for committing later
     auto & client_info = query_context->getClientInfo();
 
@@ -801,7 +801,7 @@ void MaterializeMySQLSyncThread::Buffers::commit(ContextPtr context, const MySQL
             BlockOutputStreamPtr out = getTableOutput(database, table_name_and_buffer.first + "_" + table_suffix, query_context, true);
             Stopwatch watch;
             copyData(input, *out);
-            LOG_DEBUG(&Poco::Logger::get("MaterializeMySQLThread ({})"), "Copied {} rows and elapsed {} ms",
+            LOG_DEBUG(getLogger("MaterializeMySQLThread ({})"), "Copied {} rows and elapsed {} ms",
                 table_name_and_buffer.first, table_name_and_buffer.second->first.rows(), watch.elapsedMilliseconds());
         }
 
@@ -826,12 +826,12 @@ MaterializeMySQLSyncThread::Buffers::BufferAndUniqueColumnsPtr MaterializeMySQLS
     {
         StoragePtr storage = DatabaseCatalog::instance().getTable(StorageID(database, table_name + "_" + table_suffix), context);
 
-        const StorageInMemoryMetadata & metadata = storage->getInMemoryMetadata();
+        auto metadata = storage->getInMemoryMetadataPtr();
         BufferAndUniqueColumnsPtr & buffer_and_unique_columns = data.try_emplace(
-            table_name, std::make_shared<BufferAndUniqueColumns>(metadata.getSampleBlockWithDeleteFlag(), std::vector<size_t>{})).first->second;
+            table_name, std::make_shared<BufferAndUniqueColumns>(metadata->getSampleBlockWithDeleteFlag(), std::vector<size_t>{})).first->second;
 
         /// We need to use unique key instead of sorting key as user could use table override func
-        Names required_for_unique_key = metadata.getColumnsRequiredForUniqueKey();
+        Names required_for_unique_key = metadata->getColumnsRequiredForUniqueKey();
 
         for (const auto & required_name_for_unique_key : required_for_unique_key)
             buffer_and_unique_columns->second.emplace_back(

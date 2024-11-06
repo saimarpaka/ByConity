@@ -53,6 +53,9 @@
 #include <Storages/MergeTree/MergeTreeCloudData.h>
 #include <Storages/MergeTree/Index/BitmapIndexHelper.h>
 
+#include <boost/algorithm/string.hpp>
+#include <Poco/String.h>
+
 namespace DB
 {
 namespace ErrorCodes
@@ -109,7 +112,7 @@ MergeTreeWhereOptimizer::MergeTreeWhereOptimizer(
     std::unordered_map<std::string, UInt64> column_sizes_,
     const StorageMetadataPtr & metadata_snapshot_,
     const Names & queried_columns_,
-    Poco::Logger * log_,
+    LoggerPtr log_,
     MaterializeStrategy materialize_strategy_)
     : table_columns{collections::map<std::unordered_set>(
         metadata_snapshot_->getColumns().getAllPhysical(), [](const NameAndTypePair & col) { return col.name; })}
@@ -127,6 +130,7 @@ MergeTreeWhereOptimizer::MergeTreeWhereOptimizer(
     , partition_columns(metadata_snapshot_->getPartitionKey().column_names)
     , max_prewhere_or_expression_size{context_->getSettingsRef().max_prewhere_or_expression_size}
 {
+    boost::split(skip_functions, Poco::toLower(context_->getSettingsRef().prewhere_skip_functions.value), boost::is_any_of(","));
     ASTSelectQuery & query = query_info_.query->as<ASTSelectQuery &>();
 
     const auto & primary_key = metadata_snapshot->getPrimaryKey();
@@ -727,6 +731,8 @@ bool MergeTreeWhereOptimizer::cannotBeMoved(const ASTPtr & ptr, bool is_final) c
 {
     if (const auto * function_ptr = ptr->as<ASTFunction>())
     {
+        LOG_DEBUG(getLogger("MergeTreeWhereOptimizer"), "[cannotBeMoved]: function: {} tree: {}",
+                  function_ptr->name, function_ptr->dumpTree());
         /// disallow arrayJoin expressions to be moved to PREWHERE for now
         if ("arrayJoin" == function_ptr->name)
             return true;
@@ -741,7 +747,8 @@ bool MergeTreeWhereOptimizer::cannotBeMoved(const ASTPtr & ptr, bool is_final) c
             return true;
 
         // These functions can cause performance degradation
-        if ("match" == function_ptr->name || "get_json_object" == function_ptr->name)
+        if ("match" == function_ptr->name || "get_json_object" == function_ptr->name
+            || skip_functions.count(Poco::toLower(function_ptr->name)))
             return true;
     }
     else if (auto opt_name = IdentifierSemantic::getColumnName(ptr))
@@ -945,7 +952,7 @@ void optimizePartitionPredicate(ASTPtr & query, StoragePtr storage, SelectQueryI
             Names virtual_key_names = merge_tree_data->getSampleBlockWithVirtualColumns().getNames();
             partition_key_names.insert(partition_key_names.end(), virtual_key_names.begin(), virtual_key_names.end());
             auto iter = std::stable_partition(conjuncts.begin(), conjuncts.end(), [&](const auto & predicate) {
-                PartitionPredicateVisitor::Data visitor_data{context, partition_key_names};
+                PartitionPredicateVisitor::Data visitor_data{context, storage, predicate};
                 PartitionPredicateVisitor(visitor_data).visit(predicate);
                 return visitor_data.getMatch();
             });
@@ -978,7 +985,7 @@ void optimizePartitionPredicate(ASTPtr & query, StoragePtr storage, SelectQueryI
     }
     if (query_info.partition_filter)
     {
-        LOG_TRACE(&Poco::Logger::get("optimizePartitionPredicate"), "Optimize partition prediate push down query rewrited to {} , partiton filter-{} ",
+        LOG_TRACE(getLogger("optimizePartitionPredicate"), "Optimize partition prediate push down query rewrited to {} , partiton filter-{} ",
                 queryToString(query), queryToString(query_info.partition_filter));
     }
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <Common/Logger.h>
+#include <Interpreters/Context_fwd.h>
 #include <QueryPlan/IQueryPlanStep.h>
 #include <QueryPlan/ITransformingStep.h>
 #include <QueryPlan/TableWriteStep.h>
@@ -21,6 +23,8 @@ public:
     {
         return Type::TableFinish;
     }
+    
+    void preExecute(ContextMutablePtr context);
 
     std::shared_ptr<IQueryPlanStep> copy(ContextPtr) const override;
     void transformPipeline(QueryPipeline & pipeline, const BuildQueryPipelineSettings & settings) override;
@@ -29,7 +33,7 @@ public:
         input_streams = input_streams_;
         if (insert_select_with_profiles)
         {
-            Block new_header = {ColumnWithTypeAndName(ColumnUInt64::create(), std::make_shared<DataTypeUInt64>(), "inserted_rows")};
+            Block new_header = {ColumnWithTypeAndName(ColumnUInt64::create(), std::make_shared<DataTypeUInt64>(), output_affected_row_count_symbol)};
             output_stream = DataStream{.header = std::move(new_header)};
         }
         else
@@ -56,6 +60,6 @@ private:
     String output_affected_row_count_symbol;
     ASTPtr query;
     bool insert_select_with_profiles;
-    Poco::Logger * log;
+    LoggerPtr log;
 };
 }

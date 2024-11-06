@@ -23,6 +23,7 @@
 #include <CloudServices/RpcClientBase.h>
 #include <Interpreters/Context_fwd.h>
 #include <Storages/IStorage_fwd.h>
+#include <Storages/MergeTree/DeleteBitmapMeta.h>
 #include <Storages/Kafka/KafkaTaskCommand.h>
 #include <Transaction/TxnTimestamp.h>
 #include <brpc/controller.h>
@@ -43,6 +44,7 @@ namespace DB
 namespace Protos
 {
     class CnchWorkerService_Stub;
+    class BackupCopyTask;
 }
 
 namespace IngestColumnCnch
@@ -146,11 +148,22 @@ public:
 
     brpc::CallId removeWorkerResource(TxnTimestamp txn_id, ExceptionHandlerPtr handler);
 
+    brpc::CallId broadcastManifest(
+        const ContextPtr & context,
+        const TxnTimestamp & txn_id,
+        const WorkerId & worker_id,
+        const StoragePtr & table,
+        const Protos::DataModelPartVector & parts_vector,
+        const DeleteBitmapMetaPtrVector & delete_bitmaps,
+        const ExceptionHandlerPtr & handler);
+
     void createDedupWorker(const StorageID & storage_id, const String & create_table_query, const HostWithPorts & host_ports, const size_t & deduper_index);
     void assignHighPriorityDedupPartition(const StorageID & storage_id, const Names & high_priority_partition);
     void assignRepairGran(const StorageID & storage_id, const String & partition_id, const Int64 & bucket_number, const UInt64 & max_event_time);
     void dropDedupWorker(const StorageID & storage_id);
     DedupWorkerStatus getDedupWorkerStatus(const StorageID & storage_id);
+
+    brpc::CallId sendBackupCopyTask(const ContextPtr & context, const String & backup_id, const std::vector<Protos::BackupCopyTask> & copy_tasks, const ExceptionHandlerPtr & handler);
 
 #if USE_RDKAFKA
     void submitKafkaConsumeTask(const KafkaTaskCommand & command);

@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Core/Names.h>
 #include <Core/QueryProcessingStage.h>
 #include <DataStreams/IBlockStream_fwd.h>
@@ -102,11 +103,19 @@ struct ManipulationTaskParams;
 
 using NameDependencies = std::unordered_map<String, std::vector<String>>;
 
+class BackupEntriesCollector;
+class IBackupEntry;
+using BackupEntries = std::vector<std::pair<String, std::unique_ptr<IBackupEntry>>>;
+
+struct BackupTask;
+using BackupTaskPtr = std::shared_ptr<BackupTask>;
+
 using PartNamesWithDisks = std::vector<std::pair<String, DiskPtr>>;
 using PartNamesWithDiskNames = std::vector<std::pair<String, String>>;
 
 class PlanNodeStatistics;
 using PlanNodeStatisticsPtr = std::shared_ptr<PlanNodeStatistics>;
+
 struct ColumnSize
 {
     size_t marks = 0;
@@ -173,7 +182,7 @@ public:
     virtual bool supportsReplication() const { return false; }
 
     /// Returns true if the storage supports parallel insert.
-    virtual bool supportsParallelInsert() const { return false; }
+    virtual bool supportsParallelInsert(ContextPtr /*local_context*/) const { return false; }
 
     /// Return true if the storage use MAP flattened model. i.e. MergeTree for now
     virtual bool supportsMapImplicitColumn() const { return false; }
@@ -217,7 +226,7 @@ public:
     /// NOTE: this function has significantly higher overhead than getInMemoryMetadataPtr()
     /// due to the need to copy StorageInMemoryMetadata.
     /// Prefer use getInMemoryMetadataPtr() if only read access is needed.
-    StorageInMemoryMetadata getInMemoryMetadata() const { return *metadata.get(); }
+    StorageInMemoryMetadata getInMemoryMetadataCopy() const { return *metadata.get(); }
 
     /// Get immutable version (snapshot) of storage metadata. Metadata object is
     /// multiversion, so it can be concurrently changed, but returned copy can be
@@ -250,7 +259,7 @@ public:
     NameDependencies getDependentViewsByColumn(ContextPtr context) const;
 
     /// Check whether column names and data types are valid. If not, throw Exception.
-    virtual void checkColumnsValidity(const ColumnsDescription &, [[maybe_unused]] const ASTPtr & new_settings = nullptr) const {}
+    virtual void checkMetadataValidity(const ColumnsDescription &, [[maybe_unused]] const ASTPtr & new_settings = nullptr) const {}
 
     void setCreateTableSql(String sql) { create_table_sql = std::move(sql); }
     String getCreateTableSql() const { return create_table_sql; }
@@ -313,7 +322,7 @@ private:
         const RWLock & rwlock, RWLockImpl::Type type, const String & query_id, const std::chrono::milliseconds & acquire_timeout) const;
 
 public:
-    /// Lock table for share. This lock must be acuqired if you want to be sure,
+    /// Lock table for share. This lock must be acquired if you want to be sure,
     /// that table will be not dropped while you holding this lock. It's used in
     /// variety of cases starting from SELECT queries to background merges in
     /// MergeTree.
@@ -656,11 +665,6 @@ public:
     /// We do not use mutex because it is not very important that the size could change during the operation.
     virtual void checkPartitionCanBeDropped(const ASTPtr & /*partition*/) {}
 
-    virtual Poco::Logger* getLogger() const
-    {
-        throw Exception("Method getLogger is not supported by storage " + getName(), ErrorCodes::NOT_IMPLEMENTED);
-    }
-
     /// Returns true if Storage may store some data on disk.
     /// NOTE: may not be equivalent to !getDataPaths().empty()
     virtual bool storesDataOnDisk() const { return false; }
@@ -727,6 +731,9 @@ public:
     {
         return getStorageSnapshot(metadata_snapshot, query_context);
     }
+
+    /// Extract data from the backup and put it to the storage.
+    virtual void restoreDataFromBackup(BackupTaskPtr & backup_task, const DiskPtr & backup_disk, const String & data_path_in_backup, ContextMutablePtr context, std::optional<ASTs> partitions);
 
     bool is_detached{false};
 

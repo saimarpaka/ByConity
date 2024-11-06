@@ -41,7 +41,6 @@ public:
 
     std::string getName() const override { return "Cloud" + merging_params.getModeName() + "MergeTree"; }
 
-    bool supportsParallelInsert() const override { return true; }
     bool supportsSampling() const override { return true; }
     bool supportsFinal() const override { return true; }
     bool supportsPrewhere() const override { return true; }
@@ -49,7 +48,7 @@ public:
     bool supportsMapImplicitColumn() const override { return true; }
     bool supportIntermedicateResultCache() const override
     {
-        return !getInMemoryMetadataPtr()->hasUniqueKey();
+        return true;
     }
 
     StoragePolicyPtr getStoragePolicy(StorageLocation location) const override;

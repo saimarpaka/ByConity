@@ -63,7 +63,7 @@ namespace ErrorCodes
     extern const int BUCKET_TABLE_ENGINE_MISMATCH;
 }
 
-bool DumpedData::isEmpty()
+bool DumpedData::isEmpty() const
 {
     return parts.empty() && bitmaps.empty() && staged_parts.empty();
 }
@@ -239,7 +239,7 @@ DumpedData CnchDataWriter::dumpCnchParts(
         String relative_path = part_name;
         if (disk->getType() == DiskType::Type::ByteS3)
         {
-            UUID part_id = newPartID(part->info, txn_id.toUInt64());
+            UUID part_id = CnchDataWriter::newPartID(part->info, txn_id.toUInt64());
             part->uuid = part_id;
             relative_path = UUIDHelpers::UUIDToString(part_id);
         }
@@ -259,7 +259,7 @@ DumpedData CnchDataWriter::dumpCnchParts(
         String relative_path = part_name;
         if (disk->getType() == DiskType::Type::ByteS3)
         {
-            UUID part_id = newPartID(staged_part->info, txn_id.toUInt64());
+            UUID part_id = CnchDataWriter::newPartID(staged_part->info, txn_id.toUInt64());
             staged_part->uuid = part_id;
             relative_path = UUIDHelpers::UUIDToString(part_id);
         }
@@ -379,6 +379,7 @@ void CnchDataWriter::commitDumpedParts(const DumpedData & dumped_data)
         return;
 
     TxnTimestamp txn_id = context->getCurrentTransactionID();
+    UInt32 dedup_impl_version = 0;
 
     try
     {
@@ -399,7 +400,8 @@ void CnchDataWriter::commitDumpedParts(const DumpedData & dumped_data)
         {
             auto is_server = context->getServerType() == ServerType::cnch_server;
             CnchServerClientPtr server_client;
-            if (auto worker_txn = dynamic_pointer_cast<CnchWorkerTransaction>(context->getCurrentTransaction()); worker_txn && worker_txn->tryGetServerClient())
+            auto worker_txn = dynamic_pointer_cast<CnchWorkerTransaction>(context->getCurrentTransaction());
+            if (worker_txn && worker_txn->tryGetServerClient())
             {
                 /// case: client submits INSERTs directly to worker
                 server_client = worker_txn->getServerClient();
@@ -414,7 +416,9 @@ void CnchDataWriter::commitDumpedParts(const DumpedData & dumped_data)
                 throw Exception("Server with transaction " + txn_id.toString() + " is unknown", ErrorCodes::LOGICAL_ERROR);
             }
 
-            server_client->precommitParts(context, txn_id, type, storage, dumped_data, task_id, is_server, consumer_group, tpl, binlog, peak_memory_usage);
+            dedup_impl_version = server_client->precommitParts(context, txn_id, type, storage, dumped_data, task_id, is_server, consumer_group, tpl, binlog, peak_memory_usage);
+            if (worker_txn)
+                worker_txn->setDedupImplVersion(dedup_impl_version);
         }
     }
     catch (const Exception &)
@@ -427,13 +431,14 @@ void CnchDataWriter::commitDumpedParts(const DumpedData & dumped_data)
 
     LOG_DEBUG(
         storage.getLogger(),
-        "Committed {} parts, {} bitmaps, {} staged parts in transaction {}, elapsed {} ms, dedup mode is {}",
+        "Committed {} parts, {} bitmaps, {} staged parts in transaction {}, elapsed {} ms, dedup mode is {}, dedup impl version is {}",
         dumped_parts.size(),
         delete_bitmaps.size(),
         dumped_staged_parts.size(),
         toString(UInt64(txn_id)),
         watch.elapsedMilliseconds(),
-        typeToString(dumped_data.dedup_mode));
+        typeToString(dumped_data.dedup_mode),
+        dedup_impl_version);
 }
 
 void CnchDataWriter::initialize(size_t max_threads)
@@ -544,7 +549,7 @@ void CnchDataWriter::commitPreparedCnchParts(const DumpedData & dumped_data, con
     if (context->getServerType() != ServerType::cnch_server)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Must be called in Server mode: {}", context->getServerType());
 
-    auto * log = storage.getLogger();
+    auto log = storage.getLogger();
     auto txn = context->getCurrentTransaction();
     auto txn_id = txn->getTransactionID();
     /// set main table uuid in server side
@@ -611,6 +616,8 @@ void CnchDataWriter::commitPreparedCnchParts(const DumpedData & dumped_data, con
             auto action
                 = txn->createAction<InsertAction>(storage_ptr, dumped_data.parts, dumped_data.bitmaps, dumped_data.staged_parts);
             action->as<InsertAction>()->checkAndSetDedupMode(dumped_data.dedup_mode);
+            if (from_attach)
+                action->as<InsertAction>()->setFromAttach();
             txn->appendAction(action);
             action->executeV2();
         }
@@ -681,6 +688,8 @@ void CnchDataWriter::commitPreparedCnchParts(const DumpedData & dumped_data, con
             }
 
             auto action = txn->createAction<S3AttachMetaAction>(storage_ptr, *s3_parts_info);
+            if (from_attach)
+                action->as<S3AttachMetaAction>()->setFromAttach();
             txn->appendAction(action);
             action->executeV2();
         }
@@ -713,30 +722,36 @@ void CnchDataWriter::publishStagedParts(const MergeTreeDataPartsCNCHVector & sta
 
     for (const auto & staged_part : staged_parts)
     {
-        // new part that shares the data file with the staged part
-        Protos::DataModelPart new_part_model;
-        fillPartModel(storage, *staged_part, new_part_model);
-        new_part_model.mutable_part_info()->set_mutation(txn_id);
-        new_part_model.set_txnid(txn_id);
-        new_part_model.set_delete_flag(false);
-        new_part_model.set_staging_txn_id(staged_part->info.mutation);
-        // storage may not have part columns info (CloudMergeTree), so set columns/columns_commit_time manually
-        auto new_part = createPartFromModelCommon(storage, new_part_model);
-        /// Attention: commit time has been force set in createPartFromModelCommon method, we must clear commit time here. Otherwise, it will be visible event if the txn rollback.
-        new_part->commit_time = IMergeTreeDataPart::NOT_INITIALIZED_COMMIT_TIME;
-        new_part->setColumnsPtr(std::make_shared<NamesAndTypesList>(staged_part->getColumns()));
-        new_part->columns_commit_time = staged_part->columns_commit_time;
+        UInt64 new_mutation = txn_id;
+        for (IMergeTreeDataPartPtr current_part = staged_part; current_part != nullptr; current_part = current_part->tryGetPreviousPart())
+        {
+            // new part that shares the data file with the staged part
+            Protos::DataModelPart new_part_model;
+            fillPartModel(storage, *current_part, new_part_model);
+            new_part_model.mutable_part_info()->set_mutation(new_mutation--);
+            if (current_part->isPartial())
+                new_part_model.mutable_part_info()->set_hint_mutation(new_mutation);
+            new_part_model.set_txnid(txn_id);
+            new_part_model.set_delete_flag(false);
+            new_part_model.set_staging_txn_id(current_part->info.mutation);
+            // storage may not have part columns info (CloudMergeTree), so set columns/columns_commit_time manually
+            auto new_part = createPartFromModelCommon(storage, new_part_model);
+            /// Attention: commit time has been force set in createPartFromModelCommon method, we must clear commit time here. Otherwise, it will be visible event if the txn rollback.
+            new_part->commit_time = IMergeTreeDataPart::NOT_INITIALIZED_COMMIT_TIME;
+            new_part->setColumnsPtr(std::make_shared<NamesAndTypesList>(current_part->getColumns()));
+            new_part->columns_commit_time = current_part->columns_commit_time;
 
-        /// staged drop part
-        MergeTreePartInfo drop_part_info = staged_part->info.newDropVersion(txn_id, StorageType::HDFS);
-        auto drop_part = std::make_shared<MergeTreeDataPartCNCH>(
-            storage, drop_part_info.getPartName(), drop_part_info, staged_part->volume, std::nullopt);
-        drop_part->partition = staged_part->partition;
-        drop_part->bucket_number = staged_part->bucket_number;
-        drop_part->deleted = true;
+            /// staged drop part
+            MergeTreePartInfo drop_part_info = current_part->info.newDropVersion(txn_id, StorageType::HDFS);
+            auto drop_part = std::make_shared<MergeTreeDataPartCNCH>(
+                storage, drop_part_info.getPartName(), drop_part_info, current_part->volume, std::nullopt);
+            drop_part->partition = current_part->partition;
+            drop_part->bucket_number = current_part->bucket_number;
+            drop_part->deleted = true;
 
-        items.parts.emplace_back(std::move(new_part));
-        items.staged_parts.emplace_back(std::move(drop_part));
+            items.parts.emplace_back(std::move(new_part));
+            items.staged_parts.emplace_back(std::move(drop_part));
+        }
     }
 
     /// prepare undo resources
@@ -776,7 +791,7 @@ void CnchDataWriter::preload(const MutableMergeTreeDataPartsCNCHVector & dumped_
     const auto & settings = context->getSettingsRef();
 
     if (!settings.parts_preload_level || (!storage.getSettings()->parts_preload_level && !storage.getSettings()->enable_preload_parts)
-        || !(storage.getSettings()->enable_local_disk_cache))
+        || !(storage.getSettings()->enable_local_disk_cache || storage.getSettings()->enable_nexus_fs))
         return;
 
     try
@@ -807,18 +822,6 @@ void CnchDataWriter::preload(const MutableMergeTreeDataPartsCNCHVector & dumped_
         if (storage.getSettings()->enable_parts_sync_preload)
             throw;
     }
-}
-
-UUID CnchDataWriter::newPartID(const MergeTreePartInfo& part_info, UInt64 txn_timestamp)
-{
-    UUID random_id = UUIDHelpers::generateV4();
-    UInt64& random_id_low = UUIDHelpers::getHighBytes(random_id);
-    UInt64& random_id_high = UUIDHelpers::getLowBytes(random_id);
-    boost::hash_combine(random_id_low, part_info.min_block);
-    boost::hash_combine(random_id_high, part_info.max_block);
-    boost::hash_combine(random_id_low, part_info.mutation);
-    boost::hash_combine(random_id_high, txn_timestamp);
-    return random_id;
 }
 
 }

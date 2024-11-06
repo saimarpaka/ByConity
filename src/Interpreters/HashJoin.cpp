@@ -308,7 +308,7 @@ HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_s
     , ineuqal_column_name(table_join->getInequalColumnName())
     , data(std::make_shared<RightTableData>())
     , right_sample_block(right_sample_block_)
-    , log(&Poco::Logger::get("HashJoin"))
+    , log(getLogger("HashJoin"))
 {
     LOG_DEBUG(log, "Right sample block: {}", right_sample_block.dumpStructure());
 
@@ -914,20 +914,20 @@ public:
     bool need_filter = false;
     IColumn::Filter filter;
 
-    void reserve(bool need_replicate)
+    void reserve(bool /*need_replicate*/)
     {
-        if (!max_joined_block_rows)
-            return;
+        // if (!max_joined_block_rows)
+        //     return;
 
-        /// Do not allow big allocations when user set max_joined_block_rows to huge value
-        size_t reserve_size = std::min<size_t>(max_joined_block_rows, kMaxAllowedJoinedBlockRows);
+        // /// Do not allow big allocations when user set max_joined_block_rows to huge value
+        // size_t reserve_size = std::min<size_t>(max_joined_block_rows, kMaxAllowedJoinedBlockRows);
 
-        if (need_replicate)
-            /// Reserve 10% more space for columns, because some rows can be repeated
-            reserve_size = static_cast<size_t>(1.1 * reserve_size);
+        // if (need_replicate)
+        //     /// Reserve 10% more space for columns, because some rows can be repeated
+        //     reserve_size = static_cast<size_t>(1.1 * reserve_size);
 
-        for (auto & column : columns)
-            column->reserve(reserve_size);
+        // for (auto & column : columns)
+        //     column->reserve(reserve_size);
     }
 
     VectorWithAlloc<std::pair<UInt64, size_t>> right_anti_index;
@@ -2806,7 +2806,7 @@ void HashJoin::validateInequalConditions(const ExpressionActionsPtr & inequal_co
             expression_sample_block.getByPosition(column_size - 1).name, strictnessToString(strictness), kindToString(kind));
     }
     has_inequal_condition = true;
-    LOG_DEBUG(&Poco::Logger::get("HashJoin"), "validate inequal condition for header: {}", expression_sample_block.dumpStructure());
+    LOG_DEBUG(getLogger("HashJoin"), "validate inequal condition for header: {}", expression_sample_block.dumpStructure());
 }
 
 }

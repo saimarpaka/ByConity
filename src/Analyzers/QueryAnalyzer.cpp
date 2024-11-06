@@ -59,9 +59,6 @@
 #include <Storages/StorageDistributed.h>
 #include <Storages/StorageMemory.h>
 
-#if USE_HIVE
-#    include <Storages/Hive/StorageCnchHive.h>
-#endif
 #include <sstream>
 #include <unordered_map>
 #include <Access/ContextAccess.h>
@@ -148,7 +145,7 @@ private:
     const bool enable_subcolumn_optimization_through_union;
     const bool enable_implicit_arg_type_convert; // MySQL implicit cast rules
 
-    Poco::Logger * logger = &Poco::Logger::get("QueryAnalyzerVisitor");
+    LoggerPtr logger = getLogger("QueryAnalyzerVisitor");
 
     void analyzeSetOperation(ASTPtr & node, ASTs & selects);
 
@@ -206,7 +203,6 @@ private:
     void rewriteSelectInANSIMode(ASTSelectQuery & select_query, const Aliases & aliases, const NameSet & source_columns_set);
     void normalizeAliases(ASTPtr & expr, ASTPtr & aliases_expr);
     void normalizeAliases(ASTPtr & expr, const Aliases & aliases, const NameSet & source_columns_set);
-    DataTypePtr getCommonType(const DataTypes & types);
 };
 
 static NameSet collectNames(ScopePtr scope);
@@ -270,9 +266,9 @@ Void QueryAnalyzerVisitor::visitASTInsertQuery(ASTPtr & node, const Void &)
             auto column = table_columns.tryGetPhysical(column_name);
             if (!column)
             {
-                if (const auto & func_columns = storage_metadata->getFuncColumns();
-                    !func_columns.empty() && func_columns.begin()->name == column_name)
-                    column = *func_columns.begin();
+                auto func_column = storage_metadata->getFuncColumns().tryGetByName(column_name);
+                if (func_column)
+                    column = func_column;
                 else
                     throw Exception(
                         fmt::format("Cannot find column {} when insert-select on optimizer mode", column_name), ErrorCodes::ILLEGAL_COLUMN);
@@ -451,7 +447,7 @@ void QueryAnalyzerVisitor::analyzeSetOperation(ASTPtr & node, ASTs & selects)
 
             DataTypePtr output_type;
             // promote output type to super type if necessary
-            output_type = getCommonType(elem_types);
+            output_type = getCommonType(elem_types, enable_implicit_arg_type_convert, allow_extended_conversion);
             output_desc.emplace_back(
                 first_input_desc[column_idx].name,
                 output_type,
@@ -919,7 +915,7 @@ ScopePtr QueryAnalyzerVisitor::analyzeJoinUsing(
             {
                 try
                 {
-                    output_type = getCommonType(DataTypes{left_type, right_type});
+                    output_type = getCommonType(DataTypes{left_type, right_type}, enable_implicit_arg_type_convert, allow_extended_conversion);
                 }
                 catch (DB::Exception & ex)
                 {
@@ -1014,7 +1010,7 @@ ScopePtr QueryAnalyzerVisitor::analyzeJoinUsing(
             {
                 try
                 {
-                    output_type = getCommonType(DataTypes{left_type, right_type});
+                    output_type = getCommonType(DataTypes{left_type, right_type}, enable_implicit_arg_type_convert, allow_extended_conversion);
                 }
                 catch (DB::Exception & ex)
                 {
@@ -1233,7 +1229,7 @@ ScopePtr QueryAnalyzerVisitor::analyzeJoinOn(
                             {
                                 try
                                 {
-                                    super_type = getCommonType(DataTypes{left_type, right_type});
+                                    super_type = getCommonType(DataTypes{left_type, right_type}, enable_implicit_arg_type_convert, allow_extended_conversion);
                                 }
                                 catch (DB::Exception & ex)
                                 {
@@ -1328,11 +1324,15 @@ ScopePtr QueryAnalyzerVisitor::analyzeArrayJoin(ASTArrayJoin & array_join, ASTSe
         ArrayJoinDescription array_join_desc;
         array_join_desc.expr = array_join_expr;
 
-        if (col_ref && array_join_expr->tryGetAlias().empty())
+        if (col_ref && array_join_expr->tryGetAlias().empty()) // ARRAY JOIN `arr`
         {
             output_fields[col_ref->local_index] = FieldDescription{output_fields[col_ref->local_index].name, array_type->getNestedType()};
         }
-        else
+         else if (col_ref && !array_join_expr->tryGetAlias().empty() && array_join_expr->tryGetAlias() == output_fields[col_ref->local_index].name) // ARRAY JOIN `arr` as `arr`
+        {
+            output_fields[col_ref->local_index] = FieldDescription{output_fields[col_ref->local_index].name, array_type->getNestedType()};
+        }
+        else // ARRAY JOIN `arr` as `arr2`
         {
             array_join_desc.create_new_field = true;
             output_fields.emplace_back(output_name, array_type->getNestedType());
@@ -2179,14 +2179,6 @@ void QueryAnalyzerVisitor::normalizeAliases(ASTPtr & expr, const Aliases & alias
         nullptr, /* metadata_snapshot */
         false /* rewrite_map_col */);
     QueryNormalizer(normalizer_data).visit(expr);
-}
-
-DataTypePtr QueryAnalyzerVisitor::getCommonType(const DataTypes & types)
-{
-    if (enable_implicit_arg_type_convert)
-        return getLeastSupertype<LeastSupertypeOnError::String>(types, true);
-    else
-        return getLeastSupertype(types, allow_extended_conversion);
 }
 
 NameSet collectNames(ScopePtr scope)

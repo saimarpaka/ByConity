@@ -52,7 +52,7 @@ CloudMergeTreeDedupWorker::CloudMergeTreeDedupWorker(StorageCloudMergeTree & sto
     : storage(storage_)
     , context(storage.getContext())
     , log_name(storage.getLogName() + "(DedupWorker)")
-    , log(&Poco::Logger::get(log_name))
+    , log(getLogger(log_name))
     , interval_scheduler(storage.getSettings()->staged_part_lifetime_threshold_ms_to_block_kafka_consume)
 {
     task = storage.getContext()->getUniqueTableSchedulePool().createTask(log_name, [this] { run(); });
@@ -69,7 +69,7 @@ CloudMergeTreeDedupWorker::CloudMergeTreeDedupWorker(StorageCloudMergeTree & sto
     {
         /// init current_deduper before iterate
         std::lock_guard lock(current_deduper_mutex);
-        current_deduper = std::make_unique<MergeTreeDataDeduper>(storage, context);
+        current_deduper = std::make_unique<MergeTreeDataDeduper>(storage, context, CnchDedupHelper::DedupMode::UPSERT);
     }
 
     if (storage.getSettings()->duplicate_auto_repair)
@@ -197,8 +197,10 @@ void CloudMergeTreeDedupWorker::iterate()
     try
     {
         txn = std::make_shared<CnchWorkerTransaction>(dedup_context, server_client);
-        dedup_context->setCurrentTransaction(txn);
         txn->setMainTableUUID(storage.getCnchStorageUUID());
+        dedup_context->setCurrentTransaction(txn);
+        /// we need to set context for current_deduper as partial update may need to dump parts during sub iteration
+        current_deduper->setDeduperContext(dedup_context);
     }
     catch (...)
     {
@@ -357,6 +359,8 @@ void CloudMergeTreeDedupWorker::iterate()
     }
 
     txn->commitV2();
+    /// we need to reset context for current_deduper to release lock here
+    current_deduper->setDeduperContext(context);
     LOG_INFO(log, "Committed dedup txn {} (with {} ms holding lock)", txn->getTransactionID().toUInt64(), lock_watch.elapsedMilliseconds());
 
     interval_scheduler.calNextScheduleTime(min_staged_part_timestamp, context->getTimestamp());

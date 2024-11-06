@@ -76,6 +76,8 @@ ASTPtr getFilterFromQueryInfo(const SelectQueryInfo & query_info, bool clone)
         conjuncts.emplace_back(clone ? select.where()->clone() : select.where());
     if (select.prewhere())
         conjuncts.emplace_back(clone ? select.prewhere()->clone() : select.prewhere());
+    if (query_info.partition_filter)
+        conjuncts.emplace_back(clone ? query_info.partition_filter->clone() : query_info.partition_filter);
     if (!conjuncts.empty())
         return PredicateUtils::combineConjuncts(conjuncts);
     if (!query_info.atomic_predicates_expr.empty())
@@ -153,4 +155,25 @@ TableScanCacheInfo getTableScanCacheInfo(const SelectQueryInfo & query_info)
 {
     return query_info.cache_info;
 }
+
+// For distributed query, rewrite sample ast by dividing sample_size.
+// We assume data is evenly distributed and it is reasonable to divided sample_size into several parts.
+ASTPtr rewriteSampleForDistributedTable(const ASTPtr & query_ast, size_t shard_size)
+{
+    ASTPtr rewrite_ast = query_ast->clone();
+    ASTSelectQuery * select = rewrite_ast->as<ASTSelectQuery>();
+    if (select && select->sampleSize())
+    {
+        ASTSampleRatio * sample = select->sampleSize()->as<ASTSampleRatio>();
+        if (!sample)
+            return rewrite_ast;
+        ASTSampleRatio::BigNum numerator = sample->ratio.numerator;
+        ASTSampleRatio::BigNum denominator = sample->ratio.denominator;
+        if (numerator <= 1 || denominator > 1)
+            return rewrite_ast;
+        sample->ratio.numerator = (sample->ratio.numerator + 1) / shard_size;
+    }
+    return rewrite_ast;
+}
+
 }

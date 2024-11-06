@@ -142,6 +142,9 @@ createPartFromModelCommon(const MergeTreeMetaBase & storage, const Protos::DataM
             /// this part shares the same relative path with the corresponding staged part
             MergeTreePartInfo staged_part_info = part->info;
             staged_part_info.mutation = part->staging_txn_id;
+            /// If it has staging txn id and is a partial part, it must be published in same dedup task which hint mutation version is mutation version - 1, please refer to more detail in CnchAttachProcessor.
+            if (staged_part_info.hint_mutation)
+                staged_part_info.hint_mutation = part->staging_txn_id - 1;
             part->relative_path = staged_part_info.getPartNameWithHintMutation();
         }
     }
@@ -160,6 +163,7 @@ createPartFromModelCommon(const MergeTreeMetaBase & storage, const Protos::DataM
     part->deleted = part_model.has_deleted() && part_model.deleted();
     part->delete_flag = part_model.has_delete_flag() && part_model.delete_flag();
     part->low_priority = part_model.has_low_priority() && part_model.low_priority();
+    part->partial_update_state = part_model.has_partial_update_state() ? getPartialUpdateState(part_model.partial_update_state()) : PartialUpdateState::NotPartialUpdate;
     part->bucket_number = part_model.bucket_number();
     part->table_definition_hash = part_model.table_definition_hash();
     part->mutation_commit_time = part_model.has_mutation_commit_time() ? part_model.mutation_commit_time() : 0;
@@ -296,6 +300,8 @@ void fillPartModel(const IStorage & storage, const IMergeTreeDataPart & part, Pr
         part_model.set_delete_flag(part.delete_flag);
     if (part.low_priority)
         part_model.set_low_priority(part.low_priority);
+    if (part.partial_update_state != PartialUpdateState::NotPartialUpdate)
+        part_model.set_partial_update_state(getPartialUpdateState(part.partial_update_state));
     if (part.last_modification_time)
         part_model.set_last_modification_time(part.last_modification_time);
 

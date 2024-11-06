@@ -21,6 +21,7 @@
 #include <Common/RowExistsColumnInfo.h>
 #include <Common/SipHash.h>
 #include <Common/StringUtils/StringUtils.h>
+#include <Core/SettingsEnums.h>
 #include <Storages/DataDestinationType.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeDate.h>
@@ -71,13 +72,17 @@
 #include <Optimizer/SelectQueryInfoHelper.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeWhereOptimizer.h>
+#include <Storages/PartCacheManager.h>
 #include <MergeTreeCommon/IMergeTreePartMeta.h>
 #include <CloudServices/CnchPartsHelper.h>
+
+#include <common/scope_guard_safe.h>
 
 
 namespace ProfileEvents
 {
     extern const Event CatalogTime;
+    extern const Event RejectedInserts;
 }
 
 namespace
@@ -94,6 +99,7 @@ namespace ErrorCodes
     extern const int INVALID_PARTITION_VALUE;
     extern const int UNKNOWN_PART_TYPE;
     extern const int TOO_MANY_SIMULTANEOUS_QUERIES;
+    extern const int TOO_MANY_PARTS;
     extern const int NOT_ENOUGH_SPACE;
     extern const int DIRECTORY_ALREADY_EXISTS;
     extern const int ILLEGAL_COLUMN;
@@ -129,7 +135,7 @@ MergeTreeMetaBase::MergeTreeMetaBase(
     , require_part_metadata(require_part_metadata_)
     , broken_part_callback(broken_part_callback_)
     , log_name(logger_name_)
-    , log(&Poco::Logger::get(log_name))
+    , log(::getLogger(log_name))
     , storage_settings(std::move(storage_settings_))
     , pinned_part_uuids(std::make_shared<PinnedPartUUIDs>())
     , data_parts_by_info(data_parts_indexes.get<TagByInfo>())
@@ -670,6 +676,16 @@ String MergeTreeMetaBase::getFullPathOnDisk(StorageLocation location, const Disk
     return disk->getPath() + getRelativeDataPath(location);
 }
 
+bool MergeTreeMetaBase::supportsParallelInsert(ContextPtr local_context) const
+{
+    if (!getInMemoryMetadataPtr()->hasUniqueKey())
+        return true;
+
+    if (!local_context->getSettingsRef().optimize_unique_table_write)
+        return false;
+    return getSettings()->dedup_impl_version.value == DedupImplVersion::DEDUP_IN_TXN_COMMIT;
+}
+
 NamesAndTypesList MergeTreeMetaBase::getVirtuals() const
 {
     /// Array(Tuple(String, String))
@@ -936,6 +952,74 @@ MergeTreeMetaBase::MutableDataPartPtr MergeTreeMetaBase::createPart(const String
     }
 
     return createPart(name, type, part_info, volume, relative_path, parent_part, location);
+}
+
+/// TODO: what is the performance of get parts info from part cache manager
+std::pair<Int64, Int64> MergeTreeMetaBase::getCnchPartsInfo() const
+{
+    try
+    {
+        auto part_cache_manager = getContext()->getPartCacheManager();
+        if (part_cache_manager)
+            return part_cache_manager->getTotalAndMaxPartsNumber(*this);
+    }
+    catch (...)
+    {
+        tryLogCurrentException(__FUNCTION__, "Failed to get parts info from part cache manager");
+    }
+
+    /// Just return {0, 0} to skip this time check
+    return {0, 0};
+}
+
+void MergeTreeMetaBase::cnchDelayInsertOrThrowIfNeeded() const
+{
+    Stopwatch stop_watch;
+    SCOPE_EXIT_SAFE({
+        if (stop_watch.elapsedMilliseconds() > 500)
+            LOG_INFO(log, "Delay insert check took {} ms", stop_watch.elapsedMilliseconds());
+    });
+
+    const auto settings = getSettings();
+    const Int64 allowed_max_parts_in_total = settings->max_parts_in_total;
+    const Int64 allowed_parts_to_throw_insert = settings->parts_to_throw_insert;
+
+    /// Return instantly to avoid getPartsInfo if no parts check set
+    if (allowed_max_parts_in_total == 0 && allowed_parts_to_throw_insert == 0)
+        return;
+
+    auto host_ports = getContext()->getCnchTopologyMaster()->getTargetServer(
+                                                            UUIDHelpers::UUIDToString(getCnchStorageUUID()),
+                                                             getServerVwName(), true);
+    if (!host_ports.empty() && !isLocalServer(host_ports.getRPCAddress(), std::to_string(getContext()->getRPCPort())))
+    {
+        auto server_client = getContext()->getCnchServerClient(host_ports);
+        if (server_client)
+            server_client->checkDelayInsertOrThrowIfNeeded(getStorageUUID());
+        else
+            LOG_WARNING(log, "Failed to get target server {} while checking delay insert", host_ports.getRPCAddress());
+
+        return;
+    }
+
+    auto [parts_count_in_total, parts_count_in_partition] = getCnchPartsInfo();
+    if (allowed_max_parts_in_total > 0 && parts_count_in_total >= allowed_max_parts_in_total)
+    {
+        ProfileEvents::increment(ProfileEvents::RejectedInserts);
+        throw Exception(ErrorCodes::TOO_MANY_PARTS,
+                "Too many parts (" + toString(parts_count_in_total) + ") in all partitions in total. "
+                + "This indicates wrong choice of partition key. The threshold can be modified with 'max_parts_in_total' setting "
+                + "in <merge_tree> element in config.xml or with per-table setting.");
+    }
+
+    if (allowed_parts_to_throw_insert > 0 && parts_count_in_partition >= allowed_parts_to_throw_insert)
+    {
+        ProfileEvents::increment(ProfileEvents::RejectedInserts);
+        throw Exception(
+            ErrorCodes::TOO_MANY_PARTS,
+            "Too many parts (" + toString(parts_count_in_partition) + ") in partition. Merges are processing "
+            + "significantly slower than inserts. The threshold can be modified with 'parts_to_throw_insert' setting.");
+    }
 }
 
 MergeTreeMetaBase::DataParts MergeTreeMetaBase::getDataParts(const DataPartStates & affordable_states) const
@@ -1791,10 +1875,13 @@ MergeTreeSettingsPtr MergeTreeMetaBase::getChangedSettings(const ASTPtr new_sett
     return changed_settings;
 }
 
-void MergeTreeMetaBase::checkColumnsValidity(const ColumnsDescription & columns, const ASTPtr & new_settings) const
+void MergeTreeMetaBase::checkMetadataValidity(const ColumnsDescription & columns, const ASTPtr & new_settings) const
 {
     NamesAndTypesList func_columns = getInMemoryMetadataPtr()->getFuncColumns();
     MergeTreeSettingsPtr current_settings = getChangedSettings(new_settings);
+
+    if (current_settings->enable_unique_partial_update && !current_settings->partition_level_unique_keys)
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Not support table level unique keys when enable unique partial update.");
 
     auto columns_physical = columns.getAllPhysical();
     for (auto & column: columns_physical)
@@ -1888,6 +1975,33 @@ void MergeTreeMetaBase::checkColumnsValidity(const ColumnsDescription & columns,
     }
 }
 
+bool MergeTreeMetaBase::commitTxnInWriteSuffixStage(const UInt32 & deup_impl_version, ContextPtr query_context) const
+{
+    if (!getInMemoryMetadataPtr()->hasUniqueKey() || static_cast<DedupImplVersion>(deup_impl_version) == DedupImplVersion::DEDUP_IN_TXN_COMMIT)
+        return false;
+    bool enable_staging_area = query_context->getSettingsRef().enable_staging_area_for_write || getSettings()->cloud_enable_staging_area;
+    bool enable_append_mode = query_context->getSettingsRef().dedup_key_mode == DedupKeyMode::APPEND;
+    return !enable_append_mode && !enable_staging_area;
+}
+
+bool MergeTreeMetaBase::supportsWriteInWorkers(const Context & query_context) const
+{
+    if (!getInMemoryMetadataPtr()->hasUniqueKey())
+        return true;
+    const auto & query_settings = query_context.getSettingsRef();
+    const auto & table_settings = getSettings();
+    if (query_settings.optimize_unique_table_write)
+    {
+        if (table_settings->dedup_impl_version.value == DedupImplVersion::DEDUP_IN_TXN_COMMIT)
+            return true;
+        LOG_DEBUG(log, "Can not write in workers due to dedup impl version is {}", table_settings->dedup_impl_version.value);
+    }
+    bool enable_staging_area = query_context.getSettingsRef().enable_staging_area_for_write || getSettings()->cloud_enable_staging_area;
+    bool enable_append_mode = query_context.getSettingsRef().dedup_key_mode == DedupKeyMode::APPEND;
+    return enable_append_mode || enable_staging_area;
+}
+
+
 ColumnSize MergeTreeMetaBase::getMapColumnSizes(const DataPartPtr & part, const String & map_implicit_column_name) const
 {
     auto part_checksums = part->getChecksums();
@@ -1952,7 +2066,8 @@ ASTPtr MergeTreeMetaBase::applyFilter(
         Names virtual_key_names = getSampleBlockWithVirtualColumns().getNames();
         partition_key_names.insert(partition_key_names.end(), virtual_key_names.begin(), virtual_key_names.end());
         auto iter = std::stable_partition(conjuncts.begin(), conjuncts.end(), [&](const auto & predicate) {
-            PartitionPredicateVisitor::Data visitor_data{query_context, partition_key_names};
+            PartitionPredicateVisitor::Data visitor_data{
+                query_context, (const_cast<MergeTreeMetaBase *>(this))->shared_from_this(), predicate};
             PartitionPredicateVisitor(visitor_data).visit(predicate);
             return visitor_data.getMatch();
         });
@@ -1999,7 +2114,7 @@ ASTPtr MergeTreeMetaBase::applyFilter(
         {
             double selectivity = FilterEstimator::estimateFilterSelectivity(storage_statistics, conjunct, names_and_types, query_context);
             LOG_DEBUG(
-                &Poco::Logger::get("OptimizerActivePrewhere"),
+                ::getLogger("OptimizerActivePrewhere"),
                 "conjunct=" + serializeAST(*conjunct) + ", selectivity=" + std::to_string(selectivity));
 
             if (selectivity <= query_context->getSettingsRef().max_active_prewhere_selectivity
@@ -2049,7 +2164,7 @@ ASTPtr MergeTreeMetaBase::applyFilter(
                 std::move(column_compressed_sizes),
                 getInMemoryMetadataPtr(),
                 current_info.syntax_analyzer_result->requiredSourceColumns(),
-                &Poco::Logger::get("OptimizerEarlyPrewherePushdown")};
+                ::getLogger("OptimizerEarlyPrewherePushdown")};
         }
     }
 
@@ -2166,9 +2281,17 @@ void MergeTreeMetaBase::filterPartitionByTTL(std::vector<std::shared_ptr<MergeTr
 Strings MergeTreeMetaBase::selectPartitionsByPredicate(
     const SelectQueryInfo & query_info,
     std::vector<std::shared_ptr<MergeTreePartition>> & partition_list,
-    const Names & column_names_to_return,
-    ContextPtr local_context) const
+    const Names & /* column_names_to_return */,
+    ContextPtr local_context,
+    const bool & ignore_ttl) const
 {
+    // LOG_TRACE(
+    //     log,
+    //     "selectPartitionsByPredicate, query: {}, partition_filter: {}, partition size before pruning: {}",
+    //     query_info.query->formatForErrorMessage(),
+    //     query_info.partition_filter ? query_info.partition_filter->formatForErrorMessage() : "NULL",
+    //     partition_list.size());
+
     /// Coarse grained partition pruner: filter out the partition which will definitely not satisfy the query predicate. The benefit
     /// is 2-folded: (1) we can prune data parts and (2) we can reduce numbers of calls to catalog to get parts 's metadata.
     /// Note that this step still leaves false-positive parts. For example, the partition key is `toMonth(date)` and the query
@@ -2180,7 +2303,8 @@ Strings MergeTreeMetaBase::selectPartitionsByPredicate(
     /// (3) `_partition_id` or `_partition_value` if they're in predicate
 
     /// (1) Prune partition by partition level TTL
-    filterPartitionByTTL(partition_list, local_context->tryGetCurrentTransactionID().toSecond());
+    if (!ignore_ttl)
+        filterPartitionByTTL(partition_list, local_context->tryGetCurrentTransactionID().toSecond());
 
     const auto partition_key = MergeTreePartition::adjustPartitionKey(getInMemoryMetadataPtr(), local_context);
     const auto & partition_key_expr = partition_key.expression;
@@ -2195,6 +2319,7 @@ Strings MergeTreeMetaBase::selectPartitionsByPredicate(
         }
 
         KeyCondition partition_condition(query_info, local_context, partition_key_columns, partition_key_expr);
+        // LOG_TRACE(log, "partition_condition: {}", partition_condition.toString());
         DataTypes result;
         result.reserve(partition_key_sample.getDataTypes().size());
         for (const auto & data_type : partition_key_sample.getDataTypes())
@@ -2218,25 +2343,28 @@ Strings MergeTreeMetaBase::selectPartitionsByPredicate(
         if (partition_list.size() < prev_sz)
             LOG_DEBUG(log, "Query predicates on physical columns dropped {} partitions", prev_sz - partition_list.size());
 
-        /// (3) Prune partitions if there's `_partition_id` or `_partition_value` in query predicate
-        bool has_partition_column = std::any_of(column_names_to_return.begin(), column_names_to_return.end(), [](const auto & name) {
-            return name == "_partition_id" || name == "_partition_value";
-        });
-
-        if (has_partition_column && !partition_list.empty())
+        if (!partition_list.empty())
         {
             Block partition_block = getPartitionBlockWithVirtualColumns(partition_list);
             ASTPtr expression_ast;
 
             /// Generate valid expressions for filtering
-            VirtualColumnUtils::prepareFilterBlockWithQuery(query_info.query, local_context, partition_block, expression_ast);
+            VirtualColumnUtils::prepareFilterBlockWithQuery(
+                query_info.query, local_context, partition_block, expression_ast, query_info.partition_filter);
+
+            // LOG_TRACE(
+            //     log,
+            //     "prepared filter {} is prepared, by block {}",
+            //     expression_ast ? expression_ast->formatForErrorMessage() : "NULL",
+            //     partition_block.dumpStructure());
 
             /// Generate list of partition id that fit the query predicate
             NameSet partition_ids;
-            if (expression_ast)
+            if (expression_ast && !KeyDescription::moduloToModuloLegacyRecursive(expression_ast->clone()))
             {
                 replace_func_with_known_column(expression_ast, NameSet{partition_key_columns.begin(), partition_key_columns.end()});
-                VirtualColumnUtils::filterBlockWithQuery(query_info.query, partition_block, local_context, expression_ast);
+                VirtualColumnUtils::filterBlockWithQuery(
+                    query_info.query, partition_block, local_context, expression_ast, query_info.partition_filter);
                 partition_ids = VirtualColumnUtils::extractSingleValueFromBlock<String>(partition_block, "_partition_id");
                 /// Prunning
                 prev_sz = partition_list.size();

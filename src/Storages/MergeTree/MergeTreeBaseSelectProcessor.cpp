@@ -107,7 +107,7 @@ MergeTreeBaseSelectProcessor::MergeTreeBaseSelectProcessor(
         prewhere_actions->need_filter = prewhere_info->need_filter;
 
         LOG_TRACE(
-            &Poco::Logger::get("MergeTreeBaseSelectProcessor"),
+            getLogger("MergeTreeBaseSelectProcessor"),
             "Prewhere column = {}, actions = {} ",
             prewhere_info->prewhere_column_name,
             prewhere_info->prewhere_actions->dumpDAG());
@@ -138,8 +138,11 @@ Chunk MergeTreeBaseSelectProcessor::generate()
             injectVirtualColumns(res, task.get(), partition_value_type, virt_column_names);
             if (support_intermedicate_result_cache)
             {
-                OwnerInfo owner_info{task->data_part->name, static_cast<time_t>(task->data_part->commit_time.toSecond())};
-                res.setOwnerInfo(std::move(owner_info));
+                UInt64 modification_time = task->data_part->getModificationTime();
+                /// In some cases, like mutation commands, part will not load delete bitmap for unique table, just skip result cache
+                if (modification_time == IMergeTreeDataPart::NOT_INITIALIZED_COMMIT_TIME)
+                    return res;
+                res.setOwnerInfo({task->data_part->name, static_cast<time_t>(modification_time)});
             }
 
             return res;
@@ -228,7 +231,7 @@ void MergeTreeBaseSelectProcessor::initializeReaders(
         index_executor.get(),
         avg_value_size_hints,
         profile_callback,
-        [&](const Progress& value) { progress(value); });
+        [&](const Progress & value) { updateProgress(value); });
 
     if (prewhere_info)
     {
@@ -267,7 +270,7 @@ void MergeTreeBaseSelectProcessor::initializeReaders(
             pre_index_executor.get(),
             avg_value_size_hints,
             profile_callback,
-            [&](const Progress& value) { progress(value); });
+            [&](const Progress & value) { updateProgress(value); });
     }
 }
 

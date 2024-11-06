@@ -1,4 +1,5 @@
 #pragma once
+#include <Common/Logger.h>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -61,6 +62,11 @@ public:
 
     ~MPPQueryCoordinator();
 
+    UInt64 getNormalizedQueryPlanHash() const
+    {
+        return normalized_query_plan_hash;
+    }
+
 private:
     friend class CoordinatorStateMachineDef;
 
@@ -71,7 +77,7 @@ private:
     MPPQueryOptions options;
     std::shared_ptr<PlanSegmentTree> plan_segment_tree;
     const String & query_id;
-    Poco::Logger * log;
+    LoggerPtr log;
 
     // All allowed lock order: (state_machine_mutex,status_mutex) or (status_mutex) or (state_machine_mutex)
     mutable bthread::Mutex state_machine_mutex;
@@ -87,6 +93,7 @@ private:
     bool post_processing_rpc_waiting_initialized = false;
 
     ProgressManager progress_manager;
+    UInt64 normalized_query_plan_hash = 0;
 };
 
 using MPPQueryCoordinatorPtr = std::shared_ptr<MPPQueryCoordinator>;

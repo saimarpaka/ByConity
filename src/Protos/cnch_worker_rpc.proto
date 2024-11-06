@@ -3,7 +3,7 @@ package DB.Protos;
 
 import "data_models.proto";
 import "cnch_common.proto";
-import "hive_models.proto";
+import "lake_models.proto";
 
 option cc_generic_services = true;
 
@@ -217,6 +217,7 @@ message PreloadDataPartsReq
   optional bool sync = 4;
   optional uint64 preload_level = 5;
   optional uint64 submit_ts = 6;
+  optional int64 read_injection = 7;
 }
 
 message PreloadDataPartsResp
@@ -362,6 +363,25 @@ message DropDedupWorkerReq
 }
 
 message DropDedupWorkerResp
+{
+  optional string exception = 1;
+}
+
+message BackupCopyTask
+{
+  required string source_disk = 1;
+  required string source_path = 2;
+  required string destination_disk = 3;
+  required string destination_path = 4;
+}
+
+message SendBackupCopyTaskReq
+{
+  required string id = 1;
+  repeated BackupCopyTask backup_task = 2;
+}
+
+message SendBackupCopyTaskResp
 {
   optional string exception = 1;
 }
@@ -595,6 +615,20 @@ message ExecuteDedupTaskResp
   optional string exception = 1;
 }
 
+message BroadcastManifestReq
+{
+  required UUID table_uuid = 1;
+  required uint64 txn_id = 2;
+  optional WorkerInfo worker_info = 3;
+  repeated DataModelPart parts = 4;
+  repeated DataModelDeleteBitmap delete_bitmaps = 5;
+}
+
+message BroadcastManifestResp
+{
+  optional string exception = 1;
+}
+
 service CnchWorkerService
 {
   rpc executeSimpleQuery(ExecuteSimpleQueryReq) returns (ExecuteSimpleQueryResp);
@@ -630,6 +664,8 @@ service CnchWorkerService
   rpc dropDedupWorker(DropDedupWorkerReq) returns (DropDedupWorkerResp);
   rpc getDedupWorkerStatus(GetDedupWorkerStatusReq) returns (GetDedupWorkerStatusResp);
 
+  rpc sendBackupCopyTask(SendBackupCopyTaskReq) returns (SendBackupCopyTaskResp);
+
   rpc sendCreateQuery(SendCreateQueryReq) returns (SendCreateQueryResp);
   rpc checkDataParts(CheckDataPartsReq) returns (CheckDataPartsResp);
   rpc sendOffloading(SendOffloadingReq) returns (SendOffloadingResp);
@@ -641,4 +677,6 @@ service CnchWorkerService
   rpc dropMemoryDictCache(DropMemoryDictCacheReq) returns (DropMemoryDictCacheResp);
 
   rpc executeDedupTask(ExecuteDedupTaskReq) returns (ExecuteDedupTaskResp);
+
+  rpc broadcastManifest(BroadcastManifestReq) returns (BroadcastManifestResp);
 }

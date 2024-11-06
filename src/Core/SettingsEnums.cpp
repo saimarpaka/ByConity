@@ -155,6 +155,13 @@ IMPLEMENT_SETTING_ENUM(ExpandMode, ErrorCodes::BAD_ARGUMENTS,
      {"UNION", ExpandMode::UNION},
      {"CTE", ExpandMode::CTE}})
 
+IMPLEMENT_SETTING_ENUM(
+    LogExplainAnalyzeType,
+    ErrorCodes::BAD_ARGUMENTS,
+    {{"NONE", LogExplainAnalyzeType::NONE},
+     {"QUERY_PIPELINE", LogExplainAnalyzeType::QUERY_PIPELINE},
+     {"AGGREGATED_QUERY_PIPELINE", LogExplainAnalyzeType::AGGREGATED_QUERY_PIPELINE}})
+
 IMPLEMENT_SETTING_ENUM(SpillMode, ErrorCodes::BAD_ARGUMENTS,
     {{"manual", SpillMode::MANUAL},
      {"auto", SpillMode::AUTO}})
@@ -206,6 +213,20 @@ IMPLEMENT_SETTING_ENUM(HiveMoveToPrewhereMethod, ErrorCodes::BAD_ARGUMENTS,
      {"stats", HiveMoveToPrewhereMethod::STATS},
      {"all", HiveMoveToPrewhereMethod::ALL}})
 
+IMPLEMENT_SETTING_ENUM(ParquetVersion, ErrorCodes::BAD_ARGUMENTS,
+    {{"1.0",       FormatSettings::ParquetVersion::V1_0},
+     {"2.4", FormatSettings::ParquetVersion::V2_4},
+     {"2.6", FormatSettings::ParquetVersion::V2_6},
+     {"2.latest", FormatSettings::ParquetVersion::V2_LATEST}})
+
+IMPLEMENT_SETTING_ENUM(ParquetCompression, ErrorCodes::BAD_ARGUMENTS,
+    {{"none", FormatSettings::ParquetCompression::NONE},
+     {"snappy", FormatSettings::ParquetCompression::SNAPPY},
+     {"zstd", FormatSettings::ParquetCompression::ZSTD},
+     {"gzip", FormatSettings::ParquetCompression::GZIP},
+     {"lz4", FormatSettings::ParquetCompression::LZ4},
+     {"brotli", FormatSettings::ParquetCompression::BROTLI}})
+
 IMPLEMENT_SETTING_ENUM(MaterializedViewConsistencyCheckMethod, ErrorCodes::BAD_ARGUMENTS,
     {{"NONE", MaterializedViewConsistencyCheckMethod::NONE},
      {"PARTITION", MaterializedViewConsistencyCheckMethod::PARTITION}})
@@ -228,7 +249,23 @@ IMPLEMENT_SETTING_ENUM(ShortCircuitFunctionEvaluation, ErrorCodes::BAD_ARGUMENTS
 IMPLEMENT_SETTING_ENUM(
     DedupKeyMode,
     ErrorCodes::BAD_ARGUMENTS,
-    {{"replace", DedupKeyMode::REPLACE}, {"append", DedupKeyMode::APPEND}, {"throw", DedupKeyMode::THROW}, {"ignore", DedupKeyMode::IGNORE}})
+    {{"replace", DedupKeyMode::REPLACE},
+     {"append", DedupKeyMode::APPEND},
+     {"throw", DedupKeyMode::THROW},
+     {"ignore", DedupKeyMode::IGNORE}})
+
+IMPLEMENT_SETTING_ENUM(
+    DedupPickWorkerAlgo,
+    ErrorCodes::BAD_ARGUMENTS,
+    {{"random", DedupPickWorkerAlgo::RANDOM},
+     {"pick_first", DedupPickWorkerAlgo::PICK_FIRST},
+     {"sequential", DedupPickWorkerAlgo::SEQUENTIAL},
+     {"consistent_hash", DedupPickWorkerAlgo::CONSISTENT_HASH}})
+
+IMPLEMENT_SETTING_ENUM(
+    DedupImplVersion,
+    ErrorCodes::BAD_ARGUMENTS,
+    {{"dedup_in_write_suffix", DedupImplVersion::DEDUP_IN_WRITE_SUFFIX}, {"dedup_in_txn_commit", DedupImplVersion::DEDUP_IN_TXN_COMMIT}})
 
 IMPLEMENT_SETTING_ENUM(
     RefreshViewTaskStatus,

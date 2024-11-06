@@ -112,6 +112,10 @@ DECLARE_SETTING_ENUM_WITH_RENAME(DateTimeInputFormat, FormatSettings::DateTimeIn
 
 DECLARE_SETTING_ENUM_WITH_RENAME(DateTimeOutputFormat, FormatSettings::DateTimeOutputFormat)
 
+DECLARE_SETTING_ENUM_WITH_RENAME(ParquetVersion, FormatSettings::ParquetVersion)
+
+DECLARE_SETTING_ENUM_WITH_RENAME(ParquetCompression, FormatSettings::ParquetCompression)
+
 enum class LogsLevel
 {
     none = 0,    /// Disable
@@ -250,6 +254,15 @@ enum class CTEMode
 };
 
 DECLARE_SETTING_ENUM(CTEMode)
+
+enum class LogExplainAnalyzeType
+{
+    NONE,
+    QUERY_PIPELINE,
+    AGGREGATED_QUERY_PIPELINE,
+};
+
+DECLARE_SETTING_ENUM(LogExplainAnalyzeType)
 
 enum class ExpandMode
 {
@@ -394,6 +407,24 @@ enum class DedupKeyMode
 };
 
 DECLARE_SETTING_ENUM(DedupKeyMode)
+
+enum class DedupImplVersion : int8_t
+{
+    DEDUP_IN_WRITE_SUFFIX = 1,
+    DEDUP_IN_TXN_COMMIT = 2,
+};
+
+DECLARE_SETTING_ENUM(DedupImplVersion)
+
+enum class DedupPickWorkerAlgo
+{
+    RANDOM,
+    PICK_FIRST,
+    SEQUENTIAL,
+    CONSISTENT_HASH,
+};
+
+DECLARE_SETTING_ENUM(DedupPickWorkerAlgo);
 
 enum class RefreshViewTaskStatus : int8_t
 {

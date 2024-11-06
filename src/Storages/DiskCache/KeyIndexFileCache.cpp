@@ -136,7 +136,7 @@ struct KeyIndexFileCache::Rep
 };
 
 KeyIndexFileCache::KeyIndexFileCache(Context & context, UInt64 max_size)
-    : log(&Poco::Logger::get("KeyIndexFileCache")), rep(std::make_shared<Rep>(context, max_size))
+    : log(getLogger("KeyIndexFileCache")), rep(std::make_shared<Rep>(context, max_size))
 {
     initCacheFromFileSystem();
     LOG_INFO(log, "Successfully init KeyIndexFileCache in path {} and KeyIndexFileCache max_size is {}", rep->base_path, max_size);
@@ -188,11 +188,13 @@ int KeyIndexFileCache::get(const IndexFile::RemoteFileInfo & file)
         {
             std::weak_ptr<Rep> rep_wp = rep;
             /// start a bg task to cache the file to local disk
-            auto cache_file_task = [rep_wp, file]() {
+            auto cache_file_task = [rep_wp, file, log = this->log]() {
+                Stopwatch watch;
+
                 std::shared_ptr<Rep> rep_inner = rep_wp.lock();
                 if (!rep_inner)
                 {
-                    LOG_WARNING(&Poco::Logger::get("KeyIndexFileCache"), "KeyIndexFileCache has been destory.");
+                    LOG_WARNING(log, "KeyIndexFileCache has been destroyed.");
                     return;
                 }
                 try
@@ -217,11 +219,17 @@ int KeyIndexFileCache::get(const IndexFile::RemoteFileInfo & file)
                     Poco::File(tmp_file).renameTo(dst_path);
 
                     rep_inner->cache.set(file.cache_key, CacheValue::Cached(file.size));
+
+                    LOG_DEBUG(
+                        log,
+                        "Cache {} to local disks cost {} ms",
+                        String(std::filesystem::path(file.disk->getPath()) / file.rel_path),
+                        watch.elapsedMilliseconds());
                 }
                 catch (...)
                 {
                     LOG_ERROR(
-                        &Poco::Logger::get("KeyIndexFileCache"),
+                        log,
                         "Failed to cache {} to local disks: {}",
                         String(std::filesystem::path(file.disk->getPath()) / file.rel_path),
                         getCurrentExceptionMessage(false));

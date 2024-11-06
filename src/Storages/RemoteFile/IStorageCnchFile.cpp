@@ -131,8 +131,6 @@ void IStorageCnchFile::read(
     size_t max_block_size,
     unsigned num_streams)
 {
-    tryUpdateFSClient(query_context);
-
     auto prepare_result = prepareReadContext(column_names, storage_snapshot->metadata, query_info, query_context);
 
     /// If no parts to read from - execute locally, must make sure that all stages are executed
@@ -225,7 +223,6 @@ PrepareContextResult IStorageCnchFile::prepareReadContext(
 
 BlockOutputStreamPtr IStorageCnchFile::write(const ASTPtr & query, const StorageMetadataPtr & metadata_snapshot, ContextPtr query_context)
 {
-    tryUpdateFSClient(query_context);
     return writeByLocal(query, metadata_snapshot, query_context);
 }
 
@@ -237,8 +234,8 @@ BlockOutputStreamPtr IStorageCnchFile::writeByLocal(const ASTPtr & /*query*/, co
 void IStorageCnchFile::alter(const AlterCommands & commands, ContextPtr query_context, TableLockHolder & /*table_lock_holder*/)
 {
     auto table_id = getStorageID();
-        StorageInMemoryMetadata new_metadata = getInMemoryMetadata();
-    StorageInMemoryMetadata old_metadata = getInMemoryMetadata();
+    StorageInMemoryMetadata new_metadata = getInMemoryMetadataCopy();
+    StorageInMemoryMetadata old_metadata = getInMemoryMetadataCopy();
 
     TransactionCnchPtr txn = query_context->getCurrentTransaction();
     auto action = txn->createAction<DDLAlterAction>(shared_from_this(), query_context->getSettingsRef(), query_context->getCurrentQueryId());
@@ -309,7 +306,8 @@ void IStorageCnchFile::checkAlterSettings(const AlterCommands & commands) const
            "cnch_vw_write", //not use currently
            "cnch_vw_task", //not use currently
            "resources_assign_type",
-           "simple_hash_resources"};
+           "simple_hash_resources",
+           "prefer_cnch_catalog"};
 
     /// Check whether the value is legal for Setting.
     /// For example, we have a setting item, `SettingBool setting_test`
@@ -334,7 +332,7 @@ void IStorageCnchFile::checkAlterSettings(const AlterCommands & commands) const
 
 Strings IStorageCnchFile::getPrunedFiles(const ContextPtr & query_context, const ASTPtr & query)
 {
-    Strings total_files = readFileList();
+    Strings total_files = readFileList(query_context);
 
     if (query && virtual_header)
     {

@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Core/SettingsEnums.h>
 #include <Interpreters/Context_fwd.h>
 #include <IO/Progress.h>
@@ -221,7 +222,7 @@ protected:
     std::unique_ptr<QueryProfilerReal> query_profiler_real;
     std::unique_ptr<QueryProfilerCpu> query_profiler_cpu;
 
-    Poco::Logger * log = nullptr;
+    LoggerPtr log = nullptr;
 
     friend class CurrentThread;
 
@@ -350,6 +351,7 @@ public:
     void detachQuery(bool exit_if_already_detached = false, bool thread_exits = false);
 
     void tryUpdateMaxIOThreadProfile(bool use_async_read);
+    void flushUntrackedMemory();
 
 protected:
     void applyQuerySettings();

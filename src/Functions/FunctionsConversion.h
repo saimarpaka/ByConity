@@ -81,6 +81,7 @@
 #include <Interpreters/Context.h>
 
 #include <Common/DateLUT.h>
+#include <DataTypes/DataTypeJsonb.h>
 
 namespace DB
 {
@@ -516,7 +517,7 @@ struct ConvertImpl<std::enable_if_t<IsDataTypeDateOrDateTime<ToDataType> && !std
         auto time_scale = sources->getScale();
         auto scale_multiplier = DecimalUtils::scaleMultiplier<Decimal64>(time_scale);
         // result
-        auto mutable_result_col = result_type->createColumn();
+        auto mutable_result_col = removeNullable(result_type)->createColumn();
         auto * col_to = assert_cast<typename ToDataType::ColumnType *>(mutable_result_col.get());
         auto & col_to_data = col_to->getData();
         col_to_data.resize(input_rows_count);
@@ -550,7 +551,8 @@ struct ConvertImpl<std::enable_if_t<IsDataTypeDateOrDateTime<ToDataType> && !std
                     UInt32(date_time) + components.whole, components.fractional, dt_scale_multiplier);
             }
         }
-
+        if (result_type->isNullable())
+            return ColumnNullable::create(std::move(mutable_result_col), ColumnUInt8::create(input_rows_count, 0));
         return mutable_result_col;
     }
 };
@@ -1351,9 +1353,11 @@ inline bool tryParseImpl<DataTypeDateTime>(DataTypeDateTime::FieldType & x, Read
     time_t tmp = 0;
     if (!tryReadDateTimeText(tmp, rb, *time_zone))
         return false;
-    // tryReadDateTimeText gives time that will not exceed UInt32
-    // coverity[store_truncates_time_t]
-    x = tmp;
+    // The maximum value of time_t may represents 2299-12-31 23:59:59, which may cause overflow for DataTypeDateTime::FieldType
+    if (unlikely(tmp > std::numeric_limits<DataTypeDateTime::FieldType>::max()))
+        x = std::numeric_limits<DataTypeDateTime::FieldType>::max();
+    else
+        x = tmp;
     return true;
 }
 
@@ -3904,6 +3908,17 @@ private:
         }
     }
 
+    static WrapperType createJsonbWrapper(const DataTypePtr & from_type, const DataTypeJsonb * /*to_type*/)
+    {
+        if (checkAndGetDataType<DataTypeString>(from_type.get()))
+        {
+            return &ConvertImplGenericFromString<ColumnString>::execute;
+        }
+
+        throw Exception(ErrorCodes::TYPE_MISMATCH,
+            "Cast to JSONB can be performed only from String. Got: {}", from_type->getName());
+    }
+
     template <typename FieldType>
     WrapperType createEnumWrapper(const DataTypePtr & from_type, const DataTypeEnum<FieldType> * to_type) const
     {
@@ -4428,6 +4443,8 @@ private:
                 return createObjectWrapper(from_type, checkAndGetDataType<DataTypeObject>(to_type.get()));
             case TypeIndex::SketchBinary:
                 return createSketchWrapper(from_type, static_cast<const DataTypeSketchBinary &>(*to_type));
+            case TypeIndex::JSONB:
+                return createJsonbWrapper(from_type, checkAndGetDataType<DataTypeJsonb>(to_type.get()));
             default:
                 break;
         }

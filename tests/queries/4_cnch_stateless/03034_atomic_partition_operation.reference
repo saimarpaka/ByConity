@@ -1,0 +1,29 @@
+normal table, enable copy
+attach/detach partition
+0
+1
+attach partition from
+1
+1
+1
+replace partition from
+1
+1
+0
+unique table, enable copy
+attach/detach partition
+1
+0
+1
+part chain detach/attach
+1
+1
+1
+1
+1
+
+part chain detach/attach for unique table
+11	2024-08-14	1	10
+11	2024-08-14	2	20
+11	2024-08-14	2	20
+11	2024-08-14	2	20

@@ -132,17 +132,27 @@ void UndoResource::clean(Catalog::Catalog & , [[maybe_unused]]MergeTreeMetaBase 
         disk = storage->getStoragePolicy(IStorage::StorageLocation::MAIN)->getDiskByName(diskName());
     }
 
-    /// This can happen in testing environment when disk name may change time to time
     if (!disk)
     {
-        throw Exception("Disk " + diskName() + " not found. This should only happens in testing or unstable environment. If this exception is on production, there's a bug", ErrorCodes::LOGICAL_ERROR);
+        disk = storage->getStoragePolicy(IStorage::StorageLocation::MAIN)->getAnyDisk();
+        if (!disk || disk->getType() == DiskType::Type::Local)
+        {
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "Can't find any remote disk in config but get `{}` disk",
+                !disk ? "Empty" : disk->getName());
+        }
+
+        LOG_WARNING(log, "Disk {} not found and fallback use default disk {}", diskName(), disk->getName());
     }
 
     if (type() == UndoResourceType::Part || type() == UndoResourceType::DeleteBitmap || type() == UndoResourceType::StagedPart
         || type() == UndoResourceType::S3DetachDeleteBitmap || type() == UndoResourceType::S3AttachDeleteBitmap)
     {
         const auto & resource_relative_path = type() == UndoResourceType::S3AttachDeleteBitmap ? placeholders(4) : placeholders(1);
-        String rel_path = storage->getRelativeDataPath(IStorage::StorageLocation::MAIN) + resource_relative_path;
+        /// For HDFS, rel_path is {table_uuid} / {part_id}.
+        /// For S3, as storage->getRelativeDataPath returns "", rel_path is just {part_id}
+        String rel_path = fs::path(storage->getRelativeDataPath(IStorage::StorageLocation::MAIN)) / resource_relative_path;
         if (disk->exists(rel_path))
         {
             if ((type() == UndoResourceType::Part || type() == UndoResourceType::StagedPart)
@@ -175,8 +185,28 @@ void UndoResource::clean(Catalog::Catalog & , [[maybe_unused]]MergeTreeMetaBase 
         }
         else
         {
+            const String & dst_table_uuid = uuid();
+            LOG_TRACE(log, "Deal with dst_table {}, dst_path {}, src_path {}", dst_table_uuid, dst_path, src_path);
+            if (dst_path.ends_with(dst_table_uuid) || dst_path.ends_with(dst_table_uuid + "/"))
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "dst_path {} should NEVER end with table_uuid. It is a dangerous path.", dst_path);
+
+            fs::path p(src_path);
+            String parent_path;
+            /// For path like xxx/yyy/ (part path), getting parent_path xxx/ needs call path.parent_path().parent_path().
+            /// For path like xxx/yyy (delete bitmap path), getting parent_path xxx/ needs call path.parent_path()
+            if (src_path.ends_with('/'))
+                parent_path = p.parent_path().parent_path();
+            else
+                parent_path = p.parent_path();
+
+            if (!disk->exists(parent_path))
+            {
+                LOG_WARNING(log, "src_path of {} does not exist, skip moving data and just remove dst_path of {}", parent_path, dst_path);
+                disk->removeRecursive(dst_path);
+            }
             /// move dst to src
-            disk->moveDirectory(dst_path, src_path);
+            else
+                disk->moveDirectory(dst_path, src_path);
         }
     }
     else if (type() == UndoResourceType::KVFSLockKey)
@@ -226,7 +256,7 @@ void UndoResource::commit(const Context & context) const
         DataModelDeleteBitmapPtr model_ptr = std::make_shared<Protos::DataModelDeleteBitmap>();
         model_ptr->ParseFromString(former_bitmap_meta);
         const auto & relative_path = DeleteBitmapMeta::deleteBitmapFileRelativePath(*model_ptr);
-        String rel_path = storage->getRelativeDataPath(IStorage::StorageLocation::MAIN) + relative_path;
+        String rel_path = fs::path(storage->getRelativeDataPath(IStorage::StorageLocation::MAIN)) / relative_path;
         if (disk->exists(rel_path))
         {
             LOG_DEBUG(log, "Will remove Disk {} undo path {}", disk->getPath(), rel_path);

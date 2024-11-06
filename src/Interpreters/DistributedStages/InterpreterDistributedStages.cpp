@@ -48,7 +48,7 @@ namespace ErrorCodes
 InterpreterDistributedStages::InterpreterDistributedStages(const ASTPtr & query_ptr_, ContextMutablePtr context_)
     : query_ptr(query_ptr_->clone())
     , context(std::move(context_))
-    , log(&Poco::Logger::get("InterpreterDistributedStages"))
+    , log(getLogger("InterpreterDistributedStages"))
     , plan_segment_tree(std::make_unique<PlanSegmentTree>())
 {
     initSettings();
@@ -135,40 +135,6 @@ PlanSegmentPtr MockPlanSegment(ContextPtr context)
     plan_segment->setQueryPlan(std::move(query_plan));
 
     return plan_segment;
-}
-
-void MockSendPlanSegment(ContextPtr query_context)
-{
-    auto plan_segment = MockPlanSegment(query_context);
-
-    auto cluster = query_context->getCluster("test_shard_localhost");
-
-    /**
-     * only get the current node
-     */
-    auto node = cluster->getShardsAddresses().back()[0];
-
-    auto connection = std::make_shared<Connection>(
-                    node.host_name, node.port, node.default_database,
-                    node.user, node.password, node.cluster, node.cluster_secret,
-                    "MockSendPlanSegment", node.compression, node.secure);
-
-    const auto & settings = query_context->getSettingsRef();
-    auto connection_timeouts = ConnectionTimeouts::getTCPTimeoutsWithFailover(settings);
-    connection->sendPlanSegment(connection_timeouts, plan_segment.get(), &settings, &query_context->getClientInfo());
-    connection->poll(1000);
-    Packet packet = connection->receivePacket();
-    LOG_TRACE(&Poco::Logger::get("MockSendPlanSegment"), "sendPlanSegmentToLocal finish:" + std::to_string(packet.type));
-    switch (packet.type)
-    {
-        case Protocol::Server::Exception:
-            throw *packet.exception;
-        case Protocol::Server::EndOfStream:
-            break;
-        default:
-            throw Exception("Unknown packet from server", ErrorCodes::UNKNOWN_PACKET_FROM_SERVER);
-    }
-    connection->disconnect();
 }
 
 void checkPlan(PlanSegment * lhs, PlanSegment * rhs)

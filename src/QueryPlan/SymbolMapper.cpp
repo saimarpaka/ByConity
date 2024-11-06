@@ -463,7 +463,8 @@ std::shared_ptr<DistinctStep> SymbolMapper::map(const DistinctStep & distinct)
         distinct.getSetSizeLimits(),
         distinct.getLimitHint(),
         map(distinct.getColumns()),
-        distinct.preDistinct());
+        distinct.preDistinct(),
+        distinct.canToAgg());
 }
 
 std::shared_ptr<EnforceSingleRowStep> SymbolMapper::map(const EnforceSingleRowStep & row)
@@ -718,7 +719,7 @@ std::shared_ptr<TopNFilteringStep> SymbolMapper::map(const TopNFilteringStep & t
 {
     return std::make_shared<TopNFilteringStep>(
         map(topn_filter.getInputStreams()[0]),
-        SortDescription{topn_filter.getSortDescription()},
+        map(topn_filter.getSortDescription()),
         topn_filter.getSize(),
         topn_filter.getModel(),
         topn_filter.getAlgorithm());
@@ -779,7 +780,8 @@ std::shared_ptr<LocalExchangeStep> SymbolMapper::map(const LocalExchangeStep & s
 
 std::shared_ptr<TableWriteStep> SymbolMapper::map(const TableWriteStep & step)
 {
-    return std::make_shared<TableWriteStep>(map(step.getInputStreams()[0]), step.getTarget(), step.isOutputProfiles());
+    return std::make_shared<TableWriteStep>(
+        map(step.getInputStreams()[0]), step.getTarget(), step.isOutputProfiles(), map(step.getOutputAffectedRowCountSymbol()));
 }
 
 std::shared_ptr<OutfileWriteStep> SymbolMapper::map(const OutfileWriteStep & step)
@@ -794,8 +796,10 @@ std::shared_ptr<OutfileFinishStep> SymbolMapper::map(const OutfileFinishStep & s
 
 std::shared_ptr<ReadStorageRowCountStep> SymbolMapper::map(const ReadStorageRowCountStep & step)
 {
-    return std::make_shared<ReadStorageRowCountStep>(
-        map(step.getOutputStream().header), step.getQuery(), step.getAggregateDescription(), step.getNumRows(), step.isFinal(), step.getDatabaseAndTableName());
+    auto new_step = std::make_shared<ReadStorageRowCountStep>(
+        map(step.getOutputStream().header), step.getQuery(), step.getAggregateDescription(), step.isFinal(), step.getStorageID());
+    new_step->setNumRows(step.getNumRows());
+    return new_step;
 }
 
 std::shared_ptr<BufferStep> SymbolMapper::map(const BufferStep & step)
@@ -806,7 +810,11 @@ std::shared_ptr<BufferStep> SymbolMapper::map(const BufferStep & step)
 std::shared_ptr<TableFinishStep> SymbolMapper::map(const TableFinishStep & step)
 {
     return std::make_shared<TableFinishStep>(
-        map(step.getInputStreams()[0]), step.getTarget(), step.getOutputAffectedRowCountSymbol(), step.getQuery(), step.isOutputProfiles());
+        map(step.getInputStreams()[0]),
+        step.getTarget(),
+        map(step.getOutputAffectedRowCountSymbol()),
+        step.getQuery(),
+        step.isOutputProfiles());
 }
 
 std::shared_ptr<IntermediateResultCacheStep> SymbolMapper::map(const IntermediateResultCacheStep & step)

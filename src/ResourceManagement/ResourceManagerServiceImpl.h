@@ -14,6 +14,7 @@
  */
 
 #pragma once
+#include <Common/Logger.h>
 #include <Poco/Logger.h>
 #include <Protos/resource_manager_rpc.pb.h>
 
@@ -114,32 +115,20 @@ public:
         ::DB::Protos::GetAllWorkerGroupsResp * response,
         ::google::protobuf::Closure * done) override;
 
-    void pickWorker(
-        ::google::protobuf::RpcController * controller,
-        const ::DB::Protos::RMScheduleReq * request,
-        ::DB::Protos::PickWorkerResp * response,
-        ::google::protobuf::Closure * done) override;
-
-    void pickWorkers(
-        ::google::protobuf::RpcController * controller,
-        const ::DB::Protos::RMScheduleReq * request,
-        ::DB::Protos::PickWorkersResp * response,
-        ::google::protobuf::Closure * done) override;
-
-    void pickWorkerGroup(
-        ::google::protobuf::RpcController * controller,
-        const ::DB::Protos::RMScheduleReq * request,
-        ::DB::Protos::PickWorkerGroupResp * response,
-        ::google::protobuf::Closure * done) override;
-
     void syncQueueDetails(
         ::google::protobuf::RpcController * controller,
         const ::DB::Protos::SyncQueueDetailsReq * request,
         ::DB::Protos::SyncQueueDetailsResp * response,
         ::google::protobuf::Closure * done) override;
 
+    void sendResourceRequest(
+        ::google::protobuf::RpcController * controller,
+        const ::DB::Protos::SendResourceRequestReq * request,
+        ::DB::Protos::SendResourceRequestResp * response,
+        ::google::protobuf::Closure * done) override;
+
 private:
-    Poco::Logger * log = &Poco::Logger::get("ResourceManagerServiceImpl");
+    LoggerPtr log = getLogger("ResourceManagerServiceImpl");
     ResourceManagerController & rm_controller;
     VirtualWarehouseManager & vw_manager;
     WorkerGroupManager & group_manager;

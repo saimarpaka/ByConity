@@ -1,4 +1,5 @@
 #pragma once
+#include <Common/Logger.h>
 #include <Common/config.h>
 
 #if USE_HDFS
@@ -14,7 +15,8 @@ namespace DB
 class StorageCnchHDFS : public shared_ptr_helper<StorageCnchHDFS>, public IStorageCnchFile
 {
 public:
-    Strings readFileList() override;
+    Strings readFileList(ContextPtr query_context) override;
+    void clear(ContextPtr query_context) override;
 
     /// read hdfs file parts by server local, not send resource to worker
     virtual void readByLocal(
@@ -35,7 +37,7 @@ public:
     ~StorageCnchHDFS() override = default;
 
 private:
-    Poco::Logger * log = &Poco::Logger::get("StorageCnchHDFS");
+    LoggerPtr log = getLogger("StorageCnchHDFS");
 
 public:
     StorageCnchHDFS(

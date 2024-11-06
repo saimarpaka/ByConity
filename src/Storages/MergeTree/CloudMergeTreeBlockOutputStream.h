@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <CloudServices/CnchDedupHelper.h>
 #include <CloudServices/CnchDataWriter.h>
 #include <DataStreams/IBlockOutputStream.h>
@@ -54,12 +55,17 @@ private:
     using FilterInfo = CnchDedupHelper::FilterInfo;
     FilterInfo dedupWithUniqueKey(const Block & block);
 
+    void writeSuffixForInsert();
+    void writeSuffixForUpsert();
+
+    bool shouldDedupInWriteSuffixStage();
+
     void initOverwritePartitionPruner();
 
     void checkAndInit();
 
     MergeTreeMetaBase & storage;
-    Poco::Logger * log;
+    LoggerPtr log;
     StorageMetadataPtr metadata_snapshot;
     ContextPtr context;
 
@@ -72,6 +78,8 @@ private:
     bool disable_transaction_commit{false};
     SimpleIncrement increment;
 
+    time_t last_check_parts_time = 0;
+
     ASTPtr overwrite_partition;
     NameSet overwrite_partition_ids;
 
@@ -79,6 +87,7 @@ private:
     {
         bool enable_staging_area = false;
         bool enable_append_mode = false; /// If it's true, we'll not dedup with existing parts, but it will dedup in block self.
+        bool enable_partial_update = false; /// If it's true, the write will be considered as a partial update one
     };
     DedupParameters dedup_parameters;
 };

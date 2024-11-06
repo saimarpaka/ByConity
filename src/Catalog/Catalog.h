@@ -15,10 +15,12 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <atomic>
 #include <map>
 #include <optional>
 #include <set>
+#include <Backups/BackupStatus.h>
 #include <Catalog/CatalogUtils.h>
 #include <Catalog/CatalogSettings.h>
 #include <Catalog/DataModelPartWrapper.h>
@@ -29,6 +31,7 @@
 #include <Protos/DataModelHelpers.h>
 #include <Protos/cnch_common.pb.h>
 #include <Protos/cnch_server_rpc.pb.h>
+#include <Protos/data_models.pb.h>
 #include <Statistics/ExportSymbols.h>
 #include <Statistics/StatisticsBase.h>
 // #include <Transaction/ICnchTransaction.h>
@@ -50,7 +53,7 @@
 #include <Common/Exception.h>
 #include <Common/HostWithPorts.h>
 #include <common/getFQDNOrHostName.h>
-// #include <Access/MaskingPolicyDataModel.h>
+#include <Storages/TableMetaEntry.h>
 
 namespace DB::ErrorCodes
 {
@@ -67,6 +70,9 @@ using DataModelPartPtrVector = std::vector<DataModelPartPtr>;
 struct DataModelPartWithName;
 using DataModelPartWithNamePtr = std::shared_ptr<DataModelPartWithName>;
 using DataModelPartWithNameVector = std::vector<DataModelPartWithNamePtr>;
+
+using BackupTaskModel = std::shared_ptr<Protos::DataModelBackupTask>;
+using BackupTaskModels = std::vector<BackupTaskModel>;
 }
 
 namespace DB::Catalog
@@ -170,6 +176,26 @@ public:
                        const String & create_query = "", const String & engine_name = "");
 
     /////////////////////////////
+    /// Backup related API
+    /////////////////////////////
+
+    void createBackupJob(
+        const String & backup_uuid,
+        UInt64 create_time,
+        BackupStatus backup_status,
+        const String & serialized_ast,
+        const String & server_address,
+        bool enable_auto_recover);
+
+    void updateBackupJobCAS(BackupTaskModel & backup_task, const String & expected_value);
+
+    BackupTaskModel tryGetBackupJob(const String & backup_uuid);
+
+    BackupTaskModels getAllBackupJobs();
+
+    void removeBackupJob(const String & backup_uuid);
+
+    /////////////////////////////
     /// Snapshots related API
     /////////////////////////////
 
@@ -220,6 +246,8 @@ public:
 
     bool isTableExists(const String & db, const String & name, const TxnTimestamp & ts = 0);
 
+    void restoreTableHistoryVersion(Protos::DataModelTable history_table);
+
     void alterTable(
         const Context & query_context,
         const Settings & query_settings,
@@ -252,6 +280,8 @@ public:
 
     Strings getTablesInDB(const String & database);
 
+    Strings getTableAllPreviousDefinitions(const String & table_uuid);
+
     std::vector<StoragePtr> getAllViewsOn(const Context & session_context, const StoragePtr & storage, const TxnTimestamp & ts);
 
     void setTableActiveness(const StoragePtr & storage, const bool is_active, const TxnTimestamp & ts);
@@ -270,6 +300,12 @@ public:
      * @param bucket_numbers If empty fetch all bucket_numbers (by default),
      * otherwise fetch the given bucket_numbers.
      */
+
+    ServerDataPartsWithDBM getAllServerDataPartsWithDBM(
+        const ConstStoragePtr & storage,
+        const TxnTimestamp & ts,
+        const Context * session_context,
+        VisibilityLevel visibility = VisibilityLevel::Visible);
     ServerDataPartsWithDBM getServerDataPartsInPartitionsWithDBM(
         const ConstStoragePtr & storage,
         const Strings & partitions,
@@ -292,8 +328,6 @@ public:
     ServerDataPartsVector getTrashedPartsInPartitions(const ConstStoragePtr & storage, const Strings & partitions, const TxnTimestamp & ts, VisibilityLevel visibility = VisibilityLevel::Visible);
 
     bool hasTrashedPartsInPartition(const ConstStoragePtr & storage, const String & partition);
-
-    ServerDataPartsWithDBM getAllServerDataPartsWithDBM(const ConstStoragePtr & storage, const TxnTimestamp & ts, const Context * session_context, VisibilityLevel visibility = VisibilityLevel::Visible);
 
     ServerDataPartsVector getAllServerDataParts(const ConstStoragePtr & storage, const TxnTimestamp & ts, const Context * session_context, VisibilityLevel visibility = VisibilityLevel::Visible);
     DataPartsVector getDataPartsByNames(const NameSet & names, const StoragePtr & table, const TxnTimestamp & ts);
@@ -354,12 +388,13 @@ public:
 
     std::vector<Protos::LastModificationTimeHint> getLastModificationTimeHints(const ConstStoragePtr & table);
 
-    template<typename Map>
-    void getPartitionsFromMetastore(const MergeTreeMetaBase & table, Map & partition_list);
+    /// Caller should garrantee that `lock_holder` lives longer than this call.
+    template <typename Map>
+    void getPartitionsFromMetastore(const MergeTreeMetaBase & table, Map & partition_list, std::shared_ptr<MetaLockHolder> lock_holder);
 
     Strings getPartitionIDs(const ConstStoragePtr & storage, const Context * session_context);
 
-    PrunedPartitions getPartitionsByPredicate(ContextPtr session_context, const ConstStoragePtr & storage, const SelectQueryInfo & query_info, const Names & column_names_to_return);
+    PrunedPartitions getPartitionsByPredicate(ContextPtr session_context, const ConstStoragePtr & storage, const SelectQueryInfo & query_info, const Names & column_names_to_return, const bool & ignore_ttl);
     /// dictionary related APIs
 
     void createDictionary(const StorageID & storage_id, const String & create_query);
@@ -477,6 +512,21 @@ public:
     /// clear undo buffer
     void clearUndoBuffer(const TxnTimestamp & txnID, const String & rpc_address, PlanSegmentInstanceId instance_id);
 
+    /**
+     * @brief Clean all undo buffers with given keys (in the same table).
+     *
+     * @param txnID Currently, this will be used to verify if the undo buffers are in the same table.
+     * @param keys Keys of the undo buffers.
+     */
+    void clearUndoBuffersByKeys(const TxnTimestamp & txnID, const std::vector<String> & keys);
+
+    /**
+     * @brief get Undo Buffers with there keys (in metastore). These keys can be further used to manipulate the data.
+     *
+     * @param txnID Transaction ID.
+     * @return map<table_uuid, ([keys in metastore of each undo buffer], [undo buffers])>
+     */
+    std::unordered_map<String, std::pair<std::vector<String>, UndoResources>> getUndoBuffersWithKeys(const TxnTimestamp & txnID);
     /// return storage uuid -> undo resources
     std::unordered_map<String, UndoResources> getUndoBuffer(const TxnTimestamp & txnID);
     std::unordered_map<String, UndoResources>
@@ -491,7 +541,7 @@ public:
     class UndoBufferIterator
     {
     public:
-        UndoBufferIterator(IMetaStore::IteratorPtr metastore_iter, Poco::Logger * log);
+        UndoBufferIterator(IMetaStore::IteratorPtr metastore_iter, LoggerPtr log);
         const UndoResource & getUndoResource() const;
         bool next();
         bool is_valid() const /// for testing
@@ -502,7 +552,7 @@ public:
         IMetaStore::IteratorPtr metastore_iter;
         std::optional<UndoResource> cur_undo_resource;
         bool valid = false;
-        Poco::Logger * log;
+        LoggerPtr log;
     };
 
     UndoBufferIterator getUndoBufferIterator() const;
@@ -824,7 +874,8 @@ public:
         const IMergeTreeDataPartsVector & parts,
         const IMergeTreeDataPartsVector & staged_parts,
         const DeleteBitmapMetaPtrVector & detached_bitmaps,
-        const DeleteBitmapMetaPtrVector & bitmaps);
+        const DeleteBitmapMetaPtrVector & bitmaps,
+        const UInt64 & txn_id);
     // Delete parts from `from_tbl` with `attached_parts` and `attached_staged_parts`, write detached part meta to `to_tbl` with parts, if parts is nullptr, skip this write
     // Delete bitmaps from `from_tbl` with `attached_bitmaps`, write detached bitmaps to `to_tbl` with `bitmaps`
     void detachAttachedParts(
@@ -834,7 +885,8 @@ public:
         const IMergeTreeDataPartsVector & attached_staged_parts,
         const IMergeTreeDataPartsVector & parts,
         const DeleteBitmapMetaPtrVector & attached_bitmaps,
-        const DeleteBitmapMetaPtrVector & bitmaps);
+        const DeleteBitmapMetaPtrVector & bitmaps,
+        const UInt64 & txn_id);
     // Rename part's meta for `tbl`, from detached to active
     // Rename delete bitmap's meta for `tbl`, from detached to active
     void attachDetachedPartsRaw(
@@ -903,7 +955,7 @@ public:
     void shutDown() {bg_task.reset();}
 
 private:
-    Poco::Logger * log = &Poco::Logger::get("Catalog");
+    LoggerPtr log = getLogger("Catalog");
     Context & context;
     MetastoreProxyPtr meta_proxy;
     const String name_space;

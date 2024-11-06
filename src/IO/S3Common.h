@@ -18,6 +18,7 @@
 #    include <aws/s3/model/HeadObjectResult.h>
 #    include <Poco/URI.h>
 #    include <Common/HTTPHeaderEntries.h>
+#    include <Common/Logger.h>
 #    include <Common/ThreadPool.h>
 #    include <common/types.h>
 namespace Aws::S3
@@ -29,10 +30,6 @@ namespace DB
 {
 class RemoteHostFilter;
 
-inline bool isS3Scheme(const std::string & scheme)
-{
-    return strcasecmp(scheme.c_str(), "s3") == 0;
-}
 
 bool isS3URIScheme(const String & scheme);
 }
@@ -129,6 +126,8 @@ struct URI
     }
 
     static void validateBucket(const String & bucket, const Poco::URI & uri);
+    static bool isS3Scheme(const Poco::URI & uri);
+    static bool isS3Scheme(const String & scheme);
 };
 
 class S3Config
@@ -252,6 +251,8 @@ public:
         const std::optional<std::map<String, String>> & metadata = std::nullopt,
         const std::optional<std::map<String, String>> & tags = std::nullopt) const;
 
+    void copyObject(const String & from_key, const String & to_bucket, const String & to_key);
+
     // Delete object
     void deleteObject(const String & key, bool check_existence = true) const;
     void deleteObjects(const std::vector<String> & keys) const;
@@ -293,7 +294,7 @@ public:
 private:
     void lazyRemove(const std::optional<String> & key_);
 
-    Poco::Logger * logger;
+    LoggerPtr logger;
 
     size_t batch_clean_size;
     std::function<bool(const S3::S3Util &, const String &)> filter;
@@ -335,7 +336,7 @@ struct AuthSettings
 };
 
 /// return whether the exception worth retry or not
-bool processReadException(Exception & e, Poco::Logger * log, const String & bucket, const String & key, size_t read_offset, size_t attempt);
+bool processReadException(Exception & e, LoggerPtr log, const String & bucket, const String & key, size_t read_offset, size_t attempt);
 
 void resetSessionIfNeeded(bool read_all_range_successfully, std::optional<Aws::S3::Model::GetObjectResult> & read_result);
 

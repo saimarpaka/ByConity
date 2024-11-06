@@ -38,6 +38,9 @@
 #include <Statistics/AutoStatisticsRpcUtils.h>
 #include <Statistics/AutoStatisticsManager.h>
 #include <Common/Exception.h>
+#include <Parsers/ParserBackupQuery.h>
+#include <Parsers/parseQuery.h>
+#include <Backups/BackupsWorker.h>
 #include <CloudServices/CnchDedupHelper.h>
 #include <DataTypes/ObjectUtils.h>
 #include <Parsers/ASTSerDerHelper.h>
@@ -73,6 +76,7 @@ namespace ErrorCodes
     extern const int CNCH_KAFKA_TASK_NEED_STOP;
     extern const int UNKNOWN_TABLE;
     extern const int CNCH_TOPOLOGY_NOT_MATCH_ERROR;
+    extern const int TOO_MANY_PARTS;
 }
 namespace AutoStats = Statistics::AutoStats;
 
@@ -111,7 +115,7 @@ CnchServerServiceImpl::CnchServerServiceImpl(ContextMutablePtr global_context)
     : WithMutableContext(global_context),
       server_start_time(getTS(global_context)),
       global_gc_manager(global_context),
-      log(&Poco::Logger::get("CnchServerService"))
+      log(getLogger("CnchServerService"))
 {
 }
 
@@ -177,7 +181,7 @@ void CnchServerServiceImpl::commitParts(
                         auto column_commit_time = storage->getPartColumnsCommitTime(*(parts[0]->getColumnsPtr()));
                         if (column_commit_time != storage->commit_time.toUInt64())
                         {
-                            LOG_WARNING(&Poco::Logger::get("CnchServerService"), "Kafka consumer cannot commit parts because of underlying table change. Will reschedule consume task.");
+                            LOG_WARNING(getLogger("CnchServerService"), "Kafka consumer cannot commit parts because of underlying table change. Will reschedule consume task.");
                             throw Exception(ErrorCodes::CNCH_KAFKA_TASK_NEED_STOP, "Commit fails because of storage schema change");
                         }
                     }
@@ -187,7 +191,7 @@ void CnchServerServiceImpl::commitParts(
                     for (const auto & tp : req->tpl())
                         tpl.emplace_back(cppkafka::TopicPartition(tp.topic(), tp.partition(), tp.offset()));
 
-                    LOG_TRACE(&Poco::Logger::get("CnchServerService"), "parsed tpl to commit with size: {}\n", tpl.size());
+                    LOG_TRACE(getLogger("CnchServerService"), "parsed tpl to commit with size: {}\n", tpl.size());
                 }
 
                 MySQLBinLogInfo binlog;
@@ -221,6 +225,12 @@ void CnchServerServiceImpl::commitParts(
 
                 cnch_writer.commitPreparedCnchParts(
                     DumpedData{std::move(parts), std::move(delete_bitmaps), std::move(staged_parts), dedup_mode});
+
+                // If main table uuid is not set, set it. Otherwise, skip it
+                if (cnch_txn->getMainTableUUID() == UUIDHelpers::Nil)
+                    cnch_txn->setMainTableUUID(cnch->getCnchStorageUUID());
+
+                rsp->set_dedup_impl_version(cnch_txn->getDedupImplVersion(rpc_context));
             }
             catch (...)
             {
@@ -785,8 +795,8 @@ void CnchServerServiceImpl::fetchPartitions(
 
                 session_context->setTemporaryTransaction(
                     TxnTimestamp(request->has_txnid() ? request->txnid() : session_context->getTimestamp()), 0, false);
-                auto required_partitions
-                    = gc->getCnchCatalog()->getPartitionsByPredicate(session_context, storage, query_info, column_names);
+                auto required_partitions = gc->getCnchCatalog()->getPartitionsByPredicate(
+                    session_context, storage, query_info, column_names, request->has_ignore_ttl() && request->ignore_ttl());
 
                 response->set_total_size(required_partitions.total_partition_number);
                 auto & mutable_partitions = *response->mutable_partitions();
@@ -970,6 +980,30 @@ void CnchServerServiceImpl::cleanTransaction(
         }
     );
 }
+void CnchServerServiceImpl::cleanUndoBuffers(
+    google::protobuf::RpcController *,
+    const Protos::CleanUndoBuffersReq * request,
+    Protos::CleanUndoBuffersResp * response,
+    google::protobuf::Closure * done)
+{
+    RPCHelpers::serviceHandler(done, response, [request, response, done, gc = getContext(), this] {
+        brpc::ClosureGuard done_guard(done);
+
+        auto & txn_cleaner = gc->getCnchTransactionCoordinator().getTxnCleaner();
+        TransactionRecord txn_record{request->txn_record()};
+
+        try
+        {
+            txn_cleaner.cleanUndoBuffers(txn_record );
+        }
+        catch (...)
+        {
+            LOG_WARNING(log, "Clean txn record {} failed.", txn_record.toString());
+            tryLogCurrentException(log, __PRETTY_FUNCTION__);
+            RPCHelpers::handleException(response->mutable_exception());
+        }
+    });
+}
 void CnchServerServiceImpl::acquireLock(
     google::protobuf::RpcController * cntl,
     const Protos::AcquireLockReq * request,
@@ -1066,6 +1100,30 @@ void CnchServerServiceImpl::getServerStartTime(
 {
     brpc::ClosureGuard done_guard(done);
     response->set_server_start_time(server_start_time);
+}
+
+void CnchServerServiceImpl::getDedupImplVersion(
+    google::protobuf::RpcController *,
+    const Protos::GetDedupImplVersionReq * request,
+    Protos::GetDedupImplVersionResp * response,
+    google::protobuf::Closure * done)
+{
+    RPCHelpers::serviceHandler(done, response, [request = request, response = response, done = done, gc = getContext(), log = log] {
+        brpc::ClosureGuard done_guard(done);
+        try
+        {
+            auto cnch_txn = gc->getCnchTransactionCoordinator().getTransaction(request->txn_id());
+            if (cnch_txn->getMainTableUUID() == UUIDHelpers::Nil)
+                cnch_txn->setMainTableUUID(RPCHelpers::createUUID(request->uuid()));
+            response->set_version(cnch_txn->getDedupImplVersion(gc));
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, __PRETTY_FUNCTION__);
+            RPCHelpers::handleException(response->mutable_exception());
+            response->set_version(1);
+        }
+    });
 }
 
 // About Auto Statistics
@@ -1412,7 +1470,14 @@ void CnchServerServiceImpl::redirectAttachDetachedS3Parts(
                         bitmaps.emplace_back(createFromModel(*to_cnch, bitmap_model));
 
                     global_context->getCnchCatalog()->attachDetachedParts(
-                        from_table, to_table, detached_part_names, commit_parts, commit_staged_parts, detached_bitmaps, bitmaps);
+                        from_table,
+                        to_table,
+                        detached_part_names,
+                        commit_parts,
+                        commit_staged_parts,
+                        detached_bitmaps,
+                        bitmaps,
+                        request->has_txn_id() ? request->txn_id() : 0);
                     break;
                 }
                 case Protos::DetachAttachType::ATTACH_DETACHED_RAW:
@@ -1500,7 +1565,15 @@ void CnchServerServiceImpl::redirectDetachAttachedS3Parts(
                     for (auto & bitmap_model : request->bitmaps())
                         bitmaps.emplace_back(createFromModel(*to_cnch, bitmap_model));
 
-                    global_context->getCnchCatalog()->detachAttachedParts(from_table, to_table, attached_parts, attached_staged_parts, commit_parts, attached_bitmaps, bitmaps);
+                    global_context->getCnchCatalog()->detachAttachedParts(
+                        from_table,
+                        to_table,
+                        attached_parts,
+                        attached_staged_parts,
+                        commit_parts,
+                        attached_bitmaps,
+                        bitmaps,
+                        request->has_txn_id() ? request->txn_id() : 0);
                     break;
                 }
                 case Protos::DetachAttachType::DETACH_ATTACHED_RAW:
@@ -1804,6 +1877,83 @@ void CnchServerServiceImpl::executeOptimize(
     );
 }
 
+void CnchServerServiceImpl::submitBackupTask(
+    google::protobuf::RpcController *,
+    const Protos::SubmitBackupTaskReq * request,
+    Protos::SubmitBackupTaskResp * response,
+    google::protobuf::Closure * done)
+{
+    brpc::ClosureGuard done_guard(done);
+    const String & backup_id = request->id();
+    const String & backup_command = request->command();
+
+    try
+    {
+        ThreadFromGlobalPool async_thread([=, global_context = getContext(), log = log] {
+            ContextMutablePtr context_ptr = Context::createCopy(global_context);
+
+            ParserBackupQuery backup_parser;
+            ASTPtr backup_ast = parseQuery(backup_parser, backup_command, 0, DBMS_DEFAULT_MAX_PARSER_DEPTH);
+            const ASTBackupQuery & backup_query = backup_ast->as<const ASTBackupQuery &>();
+
+            if (backup_query.kind == ASTBackupQuery::BACKUP)
+                BackupsWorker::doBackup(backup_id, backup_ast, context_ptr);
+            else
+                BackupsWorker::doRestore(backup_id, backup_ast, context_ptr);
+        });
+        async_thread.detach();
+    }
+    catch (...)
+    {
+        tryLogCurrentException(log, __PRETTY_FUNCTION__);
+        RPCHelpers::handleException(response->mutable_exception());
+    }
+}
+
+void CnchServerServiceImpl::getRunningBackupTask(
+    google::protobuf::RpcController *,
+    const Protos::GetRunningBackupTaskReq *,
+    Protos::GetRunningBackupTaskResp * response,
+    google::protobuf::Closure * done)
+{
+    RPCHelpers::serviceHandler(done, response, [response = response, done = done, global_context = getContext(), log = log] {
+        brpc::ClosureGuard done_guard(done);
+        try
+        {
+            std::optional<String> backup_id = global_context->getRunningBackupTask();
+            if (backup_id)
+                response->set_ret(backup_id.value());
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, __PRETTY_FUNCTION__);
+            RPCHelpers::handleException(response->mutable_exception());
+        }
+    });
+}
+
+void CnchServerServiceImpl::removeRunningBackupTask(
+    google::protobuf::RpcController *,
+    const Protos::RemoveRunningBackupTaskReq * request,
+    Protos::RemoveRunningBackupTaskResp * response,
+    google::protobuf::Closure * done)
+{
+    RPCHelpers::serviceHandler(
+        done, response, [request = request, response = response, done = done, global_context = getContext(), log = log] {
+            brpc::ClosureGuard done_guard(done);
+            try
+            {
+                const String & backup_id = request->id();
+                global_context->removeRunningBackupTask(backup_id);
+            }
+            catch (...)
+            {
+                tryLogCurrentException(log, __PRETTY_FUNCTION__);
+                RPCHelpers::handleException(response->mutable_exception());
+            }
+        });
+}
+
 void CnchServerServiceImpl::forceRecalculateMetrics(
     google::protobuf::RpcController *,
     const Protos::ForceRecalculateMetricsReq * request,
@@ -1925,11 +2075,42 @@ void CnchServerServiceImpl::notifyAccessEntityChange(
     });
 }
 
+void CnchServerServiceImpl::checkDelayInsertOrThrowIfNeeded(
+        google::protobuf::RpcController * cntl,
+        const Protos::checkDelayInsertOrThrowIfNeededReq * request,
+        Protos::checkDelayInsertOrThrowIfNeededResp * response,
+        google::protobuf::Closure * done)
+{
+    RPCHelpers::serviceHandler(done, response, [request = request, response = response, done = done, context = getContext(), log = log] {
+        brpc::ClosureGuard done_guard(done);
+        try
+        {
+            UUID uuid = RPCHelpers::createUUID(request->storage_uuid());
+            auto storage = context->getCnchCatalog()->getTableByUUID(*context, UUIDHelpers::UUIDToString(uuid), TxnTimestamp::maxTS());
+            auto * cnch_merge_tree = dynamic_cast<StorageCnchMergeTree*>(storage.get());
+            if (!cnch_merge_tree)
+                throw Exception(ErrorCodes::BAD_ARGUMENTS, "CnchMergeTree is expected for checkDelayInsertOrThrowIfNeeded but got " + storage->getName());
+
+            cnch_merge_tree->cnchDelayInsertOrThrowIfNeeded();
+        }
+        catch (Exception & e)
+        {
+            /// Only TOO_MANY_PARTS matters
+            if (e.code() == ErrorCodes::TOO_MANY_PARTS)
+                RPCHelpers::handleException(response->mutable_exception());
+            else
+                tryLogCurrentException(log, __PRETTY_FUNCTION__);
+        }
+        catch (...)
+        {
+            tryLogCurrentException(log, __PRETTY_FUNCTION__);
+        }
+    });
+}
 
 #if defined(__clang__)
     #pragma clang diagnostic pop
 #else
     #pragma GCC diagnostic pop
 #endif
-
 }

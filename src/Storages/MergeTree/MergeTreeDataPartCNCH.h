@@ -33,7 +33,7 @@ public:
         const VolumePtr & volume_,
         const std::optional<String> & relative_path_ = {},
         const IMergeTreeDataPart * parent_part_ = nullptr,
-        const UUID& part_id = UUIDHelpers::Nil);
+        const UUID & part_id = UUIDHelpers::Nil);
 
     MergeTreeDataPartCNCH(
         const MergeTreeMetaBase & storage_,
@@ -84,7 +84,9 @@ public:
 
     void loadColumnsChecksumsIndexes(bool require_columns_checksums, bool check_consistency) override;
 
-    void loadFromFileSystem(bool load_hint_mutation = true);
+    void loadFromFileSystem();
+
+    void copyToDetached(const String & prefix) const override;
 
     UniqueKeyIndexPtr getUniqueKeyIndex() const override;
 
@@ -103,6 +105,12 @@ public:
     /// DELETE mutation is supported by adding a implicit column _row_exists,
     /// and we combine the original delete bitmap and _row_exists when data processing.
     ImmutableDeleteBitmapPtr getDeleteBitmap(bool allow_null = false) const override;
+
+    /// For partial update mode, load column generated during the write phase.
+    /// If the corresponding checksum does not exist, a default column is generated.
+    ColumnPtr loadDeleteFlag() const;
+    ColumnPtr loadUpdateColumns() const;
+    ColumnPtr loadDedupSort() const;
 
     /// it's a no-op because in CNCH, projection parts are uploaded to parent part's data file
     virtual void projectionRemove(const String &, bool) const override { }
@@ -140,7 +148,7 @@ private:
     /// Loads marks index granularity into memory
     void loadIndexGranularity() override;
 
-    void loadMetaInfoFromBuffer(ReadBuffer & buffer, bool load_hint_mutation);
+    void loadMetaInfoFromBuffer(ReadBuffer & buffer);
 
     void calculateEachColumnSizes(ColumnSizeByName & each_columns_size, ColumnSize & total_size) const override;
     ColumnSize getColumnSizeImpl(const NameAndTypePair & column, const ChecksumsPtr & checksums, std::unordered_set<String> * processed_substreams) const;

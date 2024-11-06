@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <Common/Logger.h>
 #include <Disks/StoragePolicy.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/DistributedStages/SourceTask.h>
@@ -95,6 +96,10 @@ public:
         const VolumePtr & volume, const String & relative_path, const IMergeTreeDataPart * parent_part = nullptr,
         StorageLocation locaiton = StorageLocation::MAIN) const;
 
+    /// Check the number of parts and block writing if needed
+    std::pair<Int64, Int64> getCnchPartsInfo() const;
+    void cnchDelayInsertOrThrowIfNeeded() const;
+
     /// Parameters for various modes.
     struct MergingParams
     {
@@ -174,6 +179,7 @@ public:
     bool supportsSampling() const override { return true; }
     bool supportsIndexForIn() const override { return true; }
     bool supportsMapImplicitColumn() const override { return true; }
+    bool supportsParallelInsert(ContextPtr local_context) const override;
 
     NamesAndTypesList getVirtuals() const override;
 
@@ -181,7 +187,7 @@ public:
 
     /// Logger
     const String & getLogName() const { return log_name; }
-    Poco::Logger * getLogger() const override { return log; }
+    LoggerPtr getLogger() const { return log; }
 
     /// A global unique id for the storage. If storage UUID is not empty, use the storage UUID. Otherwise, use the address of current object.
     String getStorageUniqueID() const;
@@ -419,11 +425,16 @@ public:
     Strings getPlainMutationEntries();
 
     MergeTreeSettingsPtr getChangedSettings(const ASTPtr new_settings) const;
-    void checkColumnsValidity(const ColumnsDescription & columns, const ASTPtr & new_settings = nullptr) const override;
+    void checkMetadataValidity(const ColumnsDescription & columns, const ASTPtr & new_settings = nullptr) const override;
 
     virtual bool supportsOptimizer() const override { return true; }
 
     virtual bool supportIntermedicateResultCache() const override { return true; }
+
+    /// Just compatible with old impl for unique table
+    bool commitTxnInWriteSuffixStage(const UInt32 & deup_impl_version, ContextPtr query_context) const;
+    bool supportsWriteInWorkers(const Context & query_context) const;
+
     ColumnSize calculateMapColumnSizesImpl(const String & map_implicit_column_name) const;
 
     void resetObjectColumns(const ColumnsDescription & object_columns_) { object_columns = object_columns_; }
@@ -445,7 +456,8 @@ public:
         const SelectQueryInfo & query_info,
         std::vector<std::shared_ptr<MergeTreePartition>> & partition_list,
         const Names & column_names_to_return,
-        ContextPtr local_context) const;
+        ContextPtr local_context,
+        const bool & ignore_ttl = false) const;
 
     /**
      * @param parts input parts, must be sorted in PartComparator order
@@ -481,7 +493,7 @@ protected:
     String storage_address;
 
     String log_name;
-    Poco::Logger * log;
+    LoggerPtr log;
 
     /// Storage settings.
     /// Use get and set to receive readonly versions.

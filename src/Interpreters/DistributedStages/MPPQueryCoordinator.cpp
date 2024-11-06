@@ -12,13 +12,15 @@
 #include <Interpreters/DistributedStages/PlanSegment.h>
 #include <Interpreters/DistributedStages/PlanSegmentExecutor.h>
 #include <Interpreters/DistributedStages/PlanSegmentInstance.h>
+#include <Interpreters/DistributedStages/ProgressManager.h>
 #include <Interpreters/DistributedStages/executePlanSegment.h>
 #include <Interpreters/RuntimeFilter/RuntimeFilterManager.h>
 #include <Interpreters/SegmentScheduler.h>
 #include <Interpreters/sendPlanSegment.h>
+#include <Optimizer/Signature/PlanSegmentNormalizer.h>
+#include <Optimizer/Signature/PlanSignature.h>
+#include <QueryPlan/PlanPrinter.h>
 #include <common/logger_useful.h>
-#include "Interpreters/DistributedStages/ProgressManager.h"
-
 
 #include <boost/msm/front/euml/common.hpp>
 #include <boost/msm/front/functor_row.hpp>
@@ -178,7 +180,7 @@ MPPQueryCoordinator::MPPQueryCoordinator(
     , options(std::move(options_))
     , plan_segment_tree(std::move(plan_segment_tree_))
     , query_id(query_context->getClientInfo().current_query_id)
-    , log(&Poco::Logger::get("MPPQueryCoordinator"))
+    , log(getLogger("MPPQueryCoordinator"))
     , state_machine(std::make_unique<CoordinatorStateMachine>(this))
     , progress_manager(query_id)
 {
@@ -220,8 +222,13 @@ BlockIO MPPQueryCoordinator::execute()
 
     if (scheduler_status && !scheduler_status->exception.empty())
     {
-        throw Exception(
-            "Query failed before final task execution, error message: " + scheduler_status->exception, scheduler_status->error_code);
+        const auto error_msg = "Query failed before final task execution, error message:" + std::move(scheduler_status->exception);
+        if (isAmbiguosError(scheduler_status->error_code))
+        {
+            auto status = waitUntilFinish(scheduler_status->error_code, error_msg);
+            throw Exception(status.summarized_error_msg, status.error_code);
+        }
+        throw Exception(error_msg, scheduler_status->error_code);
     }
 
     if (!scheduler_status || !scheduler_status->is_final_stage_start)
@@ -235,8 +242,15 @@ BlockIO MPPQueryCoordinator::execute()
     final_segment->update(query_context);
     LOG_TRACE(log, "EXECUTE\n" + final_segment->toString());
 
+    if (query_context->getSettingsRef().log_normalized_query_plan_hash)
+    {
+        auto logical_plan = generatePlanSegmentPlanHash(final_segment, query_context);
+        LOG_TRACE(log, "Logical plan is {}", logical_plan);
+        normalized_query_plan_hash = std::hash<std::string>()(logical_plan);
+    }
+
     auto final_segment_instance = std::make_unique<PlanSegmentInstance>();
-    final_segment_instance->info = PlanSegmentExecutionInfo{.parallel_id = 0};
+    final_segment_instance->info = scheduler_status->final_execution_info;
     final_segment_instance->info.execution_address = getLocalAddress(*query_context);
     final_segment_instance->plan_segment = std::make_unique<PlanSegment>(std::move(*final_segment));
 

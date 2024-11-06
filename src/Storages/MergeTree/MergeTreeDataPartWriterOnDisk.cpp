@@ -28,8 +28,7 @@
 #include <DataTypes/Serializations/SerializationNullable.h>
 #include <DataTypes/DataTypeMap.h>
 #include <DataTypes/MapHelpers.h>
-#include <Storages/MergeTree/GinIndexDataPartHelper.h>
-#include <Storages/MergeTree/GinIndexStore.h>
+#include <Storages/MergeTree/GINStoreWriter.h>
 #include <Storages/MergeTree/MergeTreeIndexInverted.h>
 #include <Storages/DiskCache/DiskCacheFactory.h>
 #include <Common/escapeForFileName.h>
@@ -276,8 +275,9 @@ void MergeTreeDataPartWriterOnDisk::initSkipIndices()
                         part_path + stream_name, marks_file_extension,
                         default_codec, settings.max_compress_block_size));
 
-        GinIndexStorePtr store = nullptr;
-        if (typeid_cast<const MergeTreeIndexInverted *>(&*skip_index) != nullptr)
+        GINStoreWriter* store = nullptr;
+        if (const auto* ivt_idx = typeid_cast<const MergeTreeIndexInverted*>(skip_index.get());
+            ivt_idx != nullptr)
         {
             std::unique_ptr<IGinDataPartHelper> gin_part_helper = nullptr;
             if (data_part->getType() == IMergeTreeDataPart::Type::CNCH)
@@ -289,26 +289,31 @@ void MergeTreeDataPartWriterOnDisk::initSkipIndices()
             {
                 gin_part_helper = std::make_unique<GinDataLocalPartHelper>(*data_part);
             }
-            store = std::make_shared<GinIndexStore>(
-                stream_name, std::move(gin_part_helper), storage.getSettings()->max_digestion_size_per_segment);
-            gin_index_stores[stream_name] = store;
+            auto store_writer = GINStoreWriter::open(ivt_idx->version, stream_name,
+                std::move(gin_part_helper), storage.getSettings()->max_digestion_size_per_segment,
+                ivt_idx->params.density);
+            store = store_writer.get();
+            gin_store_writers.emplace(stream_name, std::move(store_writer));
         }
 
-        skip_indices_aggregators.push_back(skip_index->createIndexAggregatorForPart(store));
+        {
+            skip_indices_aggregators.push_back(skip_index->createIndexAggregatorForPart(store));
+        }
+
         skip_index_accumulated_marks.push_back(0);
     }
 }
 
 /**
   * Bitmap indices can be built from :
-  * 1. build in insert / merge: 
-  *   - enable build : 
-  *       build_all_bitmap_index && !only_bitmap_index: 
+  * 1. build in insert / merge:
+  *   - enable build :
+  *       build_all_bitmap_index && !only_bitmap_index:
   *   - not enable build (insert: enable_build_ab_index; merge: build_bitmap_index_in_merge):
   *       (!build_all_bitmap_index) with empty bitmap_index_columns
   * 2. alter table build bitmap of partition:
   *   - build_all_bitmap_index && only_bitmap_index
-  * 3. other mutation: 
+  * 3. other mutation:
   *   - not_build_bitmap_index
   * 4. build with dependent columns changed:
   *   - (!build_all_bitmap_index && !only_bitmap_index) with dependent columns in bitmap_index_columns
@@ -318,7 +323,7 @@ void MergeTreeDataPartWriterOnDisk::initBitmapIndices()
     if (bitmap_build_info.not_build_bitmap_index)
         return;
 
-    auto get_all_bitmap_columns = [&](const auto & all_columns) 
+    auto get_all_bitmap_columns = [&](const auto & all_columns)
     {
         bitmap_build_info.bitmap_index_columns.clear();
         for (const auto & column : all_columns)
@@ -336,7 +341,7 @@ void MergeTreeDataPartWriterOnDisk::initBitmapIndices()
         else
             get_all_bitmap_columns(columns_list);
     }
-    
+
     for (const auto & it : bitmap_build_info.bitmap_index_columns)
     {
         if (MergeTreeBitmapIndex::isBitmapIndexColumn(it.type) && MergeTreeBitmapIndex::needBuildIndex(data_part->getFullPath(), it.name))
@@ -356,7 +361,7 @@ void MergeTreeDataPartWriterOnDisk::initSegmentBitmapIndices()
     if (bitmap_build_info.not_build_segment_bitmap_index)
         return;
 
-    auto get_all_indexed_columns = [&](const auto & all_columns) 
+    auto get_all_indexed_columns = [&](const auto & all_columns)
     {
         bitmap_build_info.segment_bitmap_index_columns.clear();
         for (const auto & column : all_columns)
@@ -374,7 +379,7 @@ void MergeTreeDataPartWriterOnDisk::initSegmentBitmapIndices()
         else
             get_all_indexed_columns(columns_list);
     }
-    
+
     for (const auto & it : bitmap_build_info.segment_bitmap_index_columns)
     {
         if (MergeTreeSegmentBitmapIndex::isSegmentBitmapIndexColumn(it.type) && MergeTreeSegmentBitmapIndex::needBuildSegmentIndex(data_part->getFullPath(), it.name))
@@ -486,14 +491,18 @@ void MergeTreeDataPartWriterOnDisk::calculateAndSerializeSkipIndices(const Block
         const auto index_helper = skip_indices[i];
         auto & stream = *skip_indices_streams[i];
 
-        GinIndexStorePtr store;
+        GINStoreWriter* writer = nullptr;
         if (typeid_cast<const MergeTreeIndexInverted *>(&*index_helper) != nullptr)
         {
             String stream_name = index_helper->getFileName();
-            auto it = gin_index_stores.find(stream_name);
-            if (it == gin_index_stores.end())
+            if (auto iter = gin_store_writers.find(stream_name); iter != gin_store_writers.end())
+            {
+                writer = iter->second.get();
+            }
+            else
+            {
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Index '{}' does not exist", stream_name);
-            store = it->second;
+            }
         }
 
         for (const auto & granule : granules_to_write)
@@ -506,7 +515,9 @@ void MergeTreeDataPartWriterOnDisk::calculateAndSerializeSkipIndices(const Block
 
             if (skip_indices_aggregators[i]->empty() && granule.mark_on_start)
             {
-                skip_indices_aggregators[i] = index_helper->createIndexAggregatorForPart(store);
+                {
+                    skip_indices_aggregators[i] = index_helper->createIndexAggregatorForPart(writer);
+                }
 
                 if (stream.compressed.offset() >= settings.min_compress_block_size)
                     stream.compressed.next();
@@ -567,12 +578,12 @@ void MergeTreeDataPartWriterOnDisk::finishSkipIndicesSerialization(
         if (!skip_indices_aggregators[i]->empty())
             skip_indices_aggregators[i]->getGranuleAndReset()->serializeBinary(stream.compressed);
     }
-    for (auto & store : gin_index_stores)
+    for (auto & writer : gin_store_writers)
     {
-        store.second->finalize();
-        store.second->addToChecksums(checksums);
+        writer.second->finalize();
+        writer.second->addToChecksums(checksums);
     }
-    
+
     for (auto & stream : skip_indices_streams)
     {
         stream->finalize();
@@ -581,7 +592,7 @@ void MergeTreeDataPartWriterOnDisk::finishSkipIndicesSerialization(
             stream->sync();
     }
 
-    gin_index_stores.clear();
+    gin_store_writers.clear();
     skip_indices_streams.clear();
     skip_indices_aggregators.clear();
     skip_index_accumulated_marks.clear();
@@ -1107,8 +1118,8 @@ void MergeTreeDataPartWriterOnDisk::writeColumn(
 
         if (write_final_mark)
             writeFinalMark(name_and_type, offset_columns, serialize_settings.path);
-        
-                
+
+
         serializations[name]->enumerateStreams(finalizeStreams(name), serialize_settings.path);
     }
 
@@ -1376,7 +1387,7 @@ void MergeTreeDataPartWriterOnDisk::loadColumnCompressInfoFromSetting()
             catch (...)
             {
                 column_compress_settings.clear();
-                LOG_ERROR(&Poco::Logger::get("MergeTreeDataPartWriterOnDisk"),
+                LOG_ERROR(getLogger(),
                     "Failed to parse column compress settings from {}", settings);
             }
         }

@@ -40,6 +40,7 @@
 #include <Access/SettingsProfile.h>
 #include <Access/SettingsProfilesInfo.h>
 #include <Access/User.h>
+#include <Access/AeolusAccessUtil.h>
 #include <Catalog/Catalog.h>
 #include <CloudServices/CnchBGThreadsMap.h>
 #include <CloudServices/CnchMergeMutateThread.h>
@@ -49,6 +50,7 @@
 #include <CloudServices/CnchWorkerClientPools.h>
 #include <CloudServices/CnchWorkerResource.h>
 #include <CloudServices/ReclusteringManagerThread.h>
+#include <CloudServices/ManifestCache.h>
 #include <Compression/ICompressionCodec.h>
 #include <Coordination/Defines.h>
 #include <Coordination/KeeperDispatcher.h>
@@ -121,6 +123,7 @@
 #include <Storages/DiskCache/KeyIndexFileCache.h>
 #include <Storages/DiskCache/NvmCacheConfig.h>
 #include <Storages/DiskCache/Types.h>
+#include <Storages/NexusFS/NexusFS.h>
 #include <Storages/HDFS/HDFSCommon.h>
 #include <Storages/HDFS/HDFSFileSystem.h>
 #include <Storages/Hive/CnchHiveSettings.h>
@@ -129,10 +132,9 @@
 #include <Storages/MergeTree/BackgroundJobsExecutor.h>
 #include <Storages/MergeTree/ChecksumsCache.h>
 #include <Storages/MergeTree/CloudTableDefinitionCache.h>
-#include <Storages/MergeTree/GinIndexStore.h>
 #include <Storages/Hive/CnchHiveSettings.h>
 #include <Storages/MergeTree/DeleteBitmapCache.h>
-#include <Storages/MergeTree/GinIndexStore.h>
+#include <Storages/MergeTree/GINStoreReader.h>
 #include <Storages/MergeTree/MergeList.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/MergeTree/MergeTreeDataPartUUID.h>
@@ -268,6 +270,8 @@ namespace ErrorCodes
     extern const int CATALOG_SERVICE_INTERNAL_ERROR;
     extern const int NOT_A_LEADER;
     extern const int INVALID_SETTING_VALUE;
+    extern const int BACKUP_JOB_CREATE_FAILED;
+    extern const int BACKUP_JOB_CLEAR_FAILED;
     extern const int DATABASE_ACCESS_DENIED;
     extern const int QUERY_WAS_CANCELLED;
 }
@@ -277,7 +281,7 @@ namespace ErrorCodes
   */
 struct ContextSharedPart
 {
-    Poco::Logger * log = &Poco::Logger::get("Context");
+    LoggerPtr log = getLogger("Context");
 
     /// For access of most of shared objects. Recursive mutex.
     mutable std::recursive_mutex mutex;
@@ -424,7 +428,7 @@ struct ContextSharedPart
 
     mutable std::unique_ptr<GinIdxFilterResultCache> gin_idx_filter_result_cache;
 
-    mutable std::shared_ptr<GinIndexStoreFactory> ginindex_store_factory;
+    mutable std::shared_ptr<GINStoreReaderFactory> gin_store_reader_factory;
 
     mutable ServiceDiscoveryClientPtr sd;
     mutable PartCacheManagerPtr cache_manager; /// Manage cache of parts for cnch tables.
@@ -436,6 +440,7 @@ struct ContextSharedPart
     mutable OnceFlag global_txn_committer_initialized;
     mutable GlobalTxnCommitterPtr global_txn_committer;
     mutable GlobalDataManagerPtr global_data_manager;
+    mutable std::shared_ptr<ManifestCache> manifest_cache;
 
     bool enable_ssl = false;
 
@@ -462,7 +467,6 @@ struct ContextSharedPart
     ActionLocksManagerPtr action_locks_manager; /// Set of storages' action lockers
     std::unique_ptr<SystemLogs> system_logs; /// Used to log queries and operations on parts
     std::unique_ptr<CnchSystemLogs> cnch_system_logs; /// Used to log queries, kafka etc. Stores data in CnchMergeTree table
-    PartitionSelectorPtr bg_partition_selector; /// Partition selector for GC and Merge threads.
 
     std::optional<StorageS3Settings> storage_s3_settings; /// Settings of S3 storage
 
@@ -517,10 +521,13 @@ struct ContextSharedPart
 
     std::unique_ptr<PreparedStatementManager> prepared_statement_manager;
 
+    std::optional<String> running_backup_task;
 #if USE_LIBURING
     mutable std::once_flag io_uring_reader_initialized;
     mutable std::vector<std::unique_ptr<IOUringReader>> io_uring_reader;
 #endif
+
+    mutable NexusFSPtr nexus_fs;
 
     ContextSharedPart()
         : macros(std::make_unique<Macros>())
@@ -600,6 +607,9 @@ struct ContextSharedPart
 
         if (nvm_cache)
             nvm_cache->shutDown();
+
+        if (nexus_fs)
+            nexus_fs->shutDown();
 
         if (queue_manager)
             queue_manager->shutdown();
@@ -832,11 +842,16 @@ InterserverIOHandler & Context::getInterserverIOHandler()
 ReadSettings Context::getReadSettings() const
 {
     ReadSettings res;
+
+    res.remote_fs_read_failed_injection = settings.remote_fs_read_failed_injection;
+
     res.remote_fs_prefetch = settings.remote_filesystem_read_prefetch;
     res.local_fs_prefetch = settings.local_filesystem_read_prefetch;
     res.remote_read_log = settings.enable_remote_read_log ? getRemoteReadLog().get() : nullptr;
     res.enable_io_scheduler = settings.enable_io_scheduler;
     res.enable_io_pfra = settings.enable_io_pfra;
+    res.enable_cloudfs = settings.enable_cloudfs;
+    res.enable_nexus_fs = settings.enable_nexus_fs;
     res.local_fs_buffer_size
         = settings.max_read_buffer_size_local_fs ? settings.max_read_buffer_size_local_fs : settings.max_read_buffer_size;
     res.remote_fs_buffer_size
@@ -855,7 +870,7 @@ ReadSettings Context::getReadSettings() const
         if (getIOUringReader().isSupported())
             res.local_fs_method = LocalFSReadMethod::io_uring;
         else
-            LOG_WARNING(&Poco::Logger::get("Context"), "IOUring is not supported, use default local_fs_method");
+            LOG_WARNING(getLogger("Context"), "IOUring is not supported, use default local_fs_method");
     }
 
     return res;
@@ -1101,6 +1116,11 @@ void Context::initCnchServerResource(const TxnTimestamp & txn_id)
     server_resource = std::make_shared<CnchServerResource>(txn_id);
 }
 
+void Context::clearCnchServerResource()
+{
+    server_resource = nullptr;
+}
+
 CnchServerResourcePtr Context::getCnchServerResource() const
 {
     if (!server_resource)
@@ -1255,7 +1275,7 @@ VolumePtr Context::setTemporaryStorage(const String & path, const String & polic
     return shared->tmp_volume;
 }
 
-static void setupTmpPath(Poco::Logger * log, const std::string & path)
+static void setupTmpPath(LoggerPtr log, const std::string & path)
 try
 {
     LOG_DEBUG(log, "Setting up {} to store temporary data in it", path);
@@ -1562,7 +1582,7 @@ void Context::initResourceGroupManager(const ConfigurationPtr & )
 
     // if (!config->has("resource_groups"))
     // {
-    //     LOG_DEBUG(&Poco::Logger::get("Context"), "No config found. Not creating Resource Group Manager");
+    //     LOG_DEBUG(getLogger("Context"), "No config found. Not creating Resource Group Manager");
     //     return ;
     // }
     // auto resource_group_manager_type = config->getRawString("resource_groups.type", "vw");
@@ -1570,15 +1590,15 @@ void Context::initResourceGroupManager(const ConfigurationPtr & )
     // {
     //     if (!getResourceManagerClient())
     //     {
-    //         LOG_ERROR(&Poco::Logger::get("Context"), "Cannot create VW Resource Group Manager since Resource Manager client is not initialised.");
+    //         LOG_ERROR(getLogger("Context"), "Cannot create VW Resource Group Manager since Resource Manager client is not initialised.");
     //         return;
     //     }
-    //     LOG_DEBUG(&Poco::Logger::get("Context"), "Creating VW Resource Group Manager");
+    //     LOG_DEBUG(getLogger("Context"), "Creating VW Resource Group Manager");
     //     shared->resource_group_manager = std::make_shared<VWResourceGroupManager>(getGlobalContext());
     // }
     // else if (resource_group_manager_type == "internal")
     // {
-    //     LOG_DEBUG(&Poco::Logger::get("Context"), "Creating Internal Resource Group Manager");
+    //     LOG_DEBUG(getLogger("Context"), "Creating Internal Resource Group Manager");
     //     shared->resource_group_manager = std::make_shared<InternalResourceGroupManager>();
     // }
     // else
@@ -1941,21 +1961,12 @@ std::shared_ptr<const ContextAccess> Context::getAccess() const
 
 void Context::checkAeolusTableAccess(const String & database_name, const String & table_name) const
 {
-    String table_names = getSettingsRef().access_table_names;
-    if (table_names.empty())
-    {
-        table_names = getSettingsRef().accessible_table_names;
-        if (table_names.empty())
-            return;
-    }
-    std::vector<String> tables;
-    boost::split(tables, table_names, boost::is_any_of(" ,"));
-    /// avoid check temporary table.
-    if (database_name == DatabaseCatalog::TEMPORARY_DATABASE)
+    /// avoid check temporary and system table.
+    if (database_name == DatabaseCatalog::TEMPORARY_DATABASE || database_name == DatabaseCatalog::SYSTEM_DATABASE)
         return;
 
     String full_table_name = database_name.empty() ? table_name : database_name+"."+table_name;
-    if (std::find(tables.begin(), tables.end(), full_table_name) == tables.end())
+    if (!aeolusCheck(*this, full_table_name))
     {
         throw Exception("Access denied to " + full_table_name , ErrorCodes::DATABASE_ACCESS_DENIED);
     }
@@ -2296,7 +2307,7 @@ void Context::applySettingsChangesWithLock(const SettingsChanges & changes, bool
     std::function<void(const SettingsChanges &)> find_dialect_type_if_any = [&](const SettingsChanges & setting_changes) {
         for (const auto & change : setting_changes)
         {
-            if (change.name == "profile")
+            if (change.name == "profile" && getServerType() == ServerType::cnch_server)
             {
                 UUID profile_id = getAccessControlManager().getID<SettingsProfile>(change.value.safeGet<String>());
                 auto profile_info = getAccessControlManager().getSettingsProfileInfo(profile_id);
@@ -2331,7 +2342,9 @@ void Context::applySettingsChangesWithLock(const SettingsChanges & changes, bool
     }
 
     // skip if a previous setting change is in process
-    bool apply_ansi_related_settings = dialect_type_opt && !settings.dialect_type.pending;
+    // skip if current and target are same
+    bool apply_ansi_related_settings = dialect_type_opt && !settings.dialect_type.pending
+        && settings.dialect_type.value != SettingFieldDialectTypeTraits::fromString(*dialect_type_opt);
 
     if (apply_ansi_related_settings)
     {
@@ -2341,7 +2354,11 @@ void Context::applySettingsChangesWithLock(const SettingsChanges & changes, bool
     }
 
     for (const SettingChange & change : changes)
+    {
+        if (change.name == "profile" && getServerType() != ServerType::cnch_server)
+            continue;
         applySettingChangeWithLock(change, lock);
+    }
     applySettingsQuirks(settings);
 
     if (apply_ansi_related_settings)
@@ -2951,14 +2968,13 @@ void Context::setFooterCache(size_t max_size_in_bytes)
         ArrowFooterCache::initialize(max_size_in_bytes);
 }
 
-void Context::setUncompressedCache(size_t max_size_in_bytes)
+void Context::setUncompressedCache(size_t max_size_in_bytes, bool shard_mode)
 {
     auto lock = getLock(); // checked
 
     if (shared->uncompressed_cache)
         throw Exception("Uncompressed cache has been already created.", ErrorCodes::LOGICAL_ERROR);
-
-    shared->uncompressed_cache = std::make_shared<UncompressedCache>(max_size_in_bytes);
+    shared->uncompressed_cache = std::make_shared<UncompressedCache>(max_size_in_bytes, shard_mode);
 }
 
 
@@ -3002,6 +3018,8 @@ void Context::dropMarkCache() const
 
 std::shared_ptr<CloudTableDefinitionCache> Context::tryGetCloudTableDefinitionCache() const
 {
+    if (hasSessionTimeZone())
+        return nullptr;
     callOnce(shared->cloud_table_definition_cache_initialized, [&] {
         const Poco::Util::AbstractConfiguration & config = getConfigRef();
         auto cache_size = config.getUInt(".cloud_table_definition_cache_size", 50000);
@@ -3889,17 +3907,6 @@ bool Context::hasTraceCollector() const
     return shared->hasTraceCollector();
 }
 
-void Context::initBGPartitionSelector()
-{
-    if (shared->server_type == ServerType::cnch_server && !shared->bg_partition_selector)
-        shared->bg_partition_selector = std::make_shared<CnchBGThreadPartitionSelector>(getGlobalContext());
-}
-
-PartitionSelectorPtr Context::getBGPartitionSelector() const
-{
-    return shared->bg_partition_selector;
-}
-
 std::shared_ptr<QueryLog> Context::getQueryLog() const
 {
     auto lock = getLock(); // checked
@@ -4575,7 +4582,7 @@ void Context::setDefaultProfiles(const Poco::Util::AbstractConfiguration & confi
     shared->system_profile_name = config.getString("system_profile", shared->default_profile_name);
     setCurrentProfile(shared->system_profile_name);
 
-    applySettingsQuirks(settings, &Poco::Logger::get("SettingsQuirks"));
+    applySettingsQuirks(settings, getLogger("SettingsQuirks"));
 
     shared->buffer_profile_name = config.getString("buffer_profile", shared->system_profile_name);
     buffer_context = Context::createCopy(shared_from_this());
@@ -5049,7 +5056,7 @@ DeleteBitmapCachePtr Context::getDeleteBitmapCache() const
 void Context::setMetaChecker()
 {
     auto meta_checker = [this]() {
-        Poco::Logger * log = &Poco::Logger::get("MetaChecker");
+        LoggerPtr log = getLogger("MetaChecker");
 
         Stopwatch stopwatch;
         LOG_DEBUG(log, "Start to run metadata synchronization task.");
@@ -5157,17 +5164,18 @@ GinIdxFilterResultCache* Context::getGinIndexFilterResultCache() const
     return shared->gin_idx_filter_result_cache.get();
 }
 
-void Context::setGinIndexStoreFactory(const GinIndexStoreCacheSettings & settings_)
+void Context::setGINStoreReaderFactory(const GINStoreReaderFactorySettings & settings_)
 {
-    if (shared->ginindex_store_factory)
-        throw Exception("ginindex_store_factory has been already created.", ErrorCodes::LOGICAL_ERROR);
-
-    shared->ginindex_store_factory = std::make_shared<GinIndexStoreFactory>(settings_);
+    if (shared->gin_store_reader_factory)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "GINStoreReaderFactory has already "
+            "been created");
+    
+    shared->gin_store_reader_factory = std::make_shared<GINStoreReaderFactory>(settings_);
 }
 
-std::shared_ptr<GinIndexStoreFactory> Context::getGinIndexStoreFactory() const
+std::shared_ptr<GINStoreReaderFactory> Context::getGINStoreReaderFactory() const
 {
-    return shared->ginindex_store_factory;
+    return shared->gin_store_reader_factory;
 }
 
 void Context::setPrimaryIndexCache(size_t cache_size_in_bytes)
@@ -5296,6 +5304,22 @@ PartCacheManagerPtr Context::getPartCacheManager() const
     /// no need to lock because PartCacheManager is initialized during server start up,
     /// there is no concurrent setPartCacheManager and getPartCacheManager usage.
     return shared->cache_manager;
+}
+
+void Context::setManifestCache()
+{
+    auto lock = getLock();
+
+    if (!shared->manifest_cache)
+        shared->manifest_cache = std::make_shared<ManifestCache>(getSettingsRef().max_manifest_cache_size, std::chrono::seconds(getSettingsRef().manifest_cache_min_lifetime.value.totalSeconds()));
+}
+
+std::shared_ptr<ManifestCache> Context::getManifestCache() const
+{
+    if (!shared->manifest_cache)
+        throw Exception("Manifest cache is not initialized", ErrorCodes::LOGICAL_ERROR);
+
+    return shared->manifest_cache;
 }
 
 void Context::initCatalog(const MetastoreConfig & catalog_conf, const String & name_space, bool writable)
@@ -5644,6 +5668,11 @@ void Context::initCnchBGThreads()
 {
     auto lock = getLock(); // checked
     shared->cnch_bg_threads_array = std::make_unique<CnchBGThreadsMapArray>(shared_from_this());
+}
+
+UInt32 Context::getEpoch()
+{
+    return shared->cnch_bg_threads_array->getEpoch();
 }
 
 CnchBGThreadsMap * Context::getCnchBGThreadsMap(CnchBGThreadType type) const
@@ -6014,7 +6043,7 @@ void Context::clearOptimizerProfile()
     optimizer_profile = nullptr;
 }
 
-void Context::logOptimizerProfile(Poco::Logger * log, String prefix, String name, String time, bool is_rule)
+void Context::logOptimizerProfile(LoggerPtr log, String prefix, String name, String time, bool is_rule)
 {
     if (settings.log_optimizer_run_time && log)
         LOG_DEBUG(log, prefix + name + " " + time);
@@ -6075,6 +6104,55 @@ PlanCacheManager* Context::getPlanCacheManager()
     return shared->plan_cache_manager ? shared->plan_cache_manager.get() : nullptr;
 }
 
+bool Context::trySetRunningBackupTask(const String & backup_id)
+{
+    auto lock = getLock();
+    if (!shared->running_backup_task)
+    {
+        shared->running_backup_task = backup_id;
+        return true;
+    }
+    else if (shared->running_backup_task != backup_id)
+    {
+        LOG_INFO(
+            shared->log,
+            "Cannot create new backup task {} because there is one running backup task {}",
+            backup_id,
+            shared->running_backup_task.value());
+        return false;
+    }
+    return true;
+}
+
+bool Context::hasRunningBackupTask() const
+{
+    auto lock = getLock();
+    return shared->running_backup_task.has_value();
+}
+
+std::optional<String> Context::getRunningBackupTask() const
+{
+    auto lock = getLock();
+    return shared->running_backup_task;
+}
+
+bool Context::checkRunningBackupTask(const String & backup_id) const
+{
+    auto lock = getLock();
+    return shared->running_backup_task && shared->running_backup_task == backup_id;
+}
+
+void Context::removeRunningBackupTask(const String & backup_id)
+{
+    auto lock = getLock();
+    if (!shared->running_backup_task || shared->running_backup_task != backup_id)
+    {
+        LOG_WARNING(shared->log, "Cannot remove backup task {}, which is not running in current server", backup_id);
+        return;
+    }
+    shared->running_backup_task.reset();
+}
+
 void Context::setPreparedStatementManager(std::unique_ptr<PreparedStatementManager> && manager)
 {
     auto lock = getLock(); // checked
@@ -6098,7 +6176,14 @@ UInt32 Context::getQueryMaxExecutionTime() const
         return 100 * 60 * 1000; // default as 100min
 }
 
-void Context::setQueryExpirationTimeStamp()
+timespec Context::getQueryExpirationTimeStamp() const
+{
+    if (!query_expiration_timestamp)
+        throw Exception("query_expiration_timestamp has not set.", ErrorCodes::LOGICAL_ERROR);
+    return query_expiration_timestamp.value();
+}
+
+void Context::initQueryExpirationTimeStamp()
 {
     auto initial_query_start_time_ms = client_info.initial_query_start_time_microseconds / 1000;
     // Internal queries are those executed without an independent client context,
@@ -6139,4 +6224,47 @@ IOUringReader & Context::getIOUringReader() const
     return *reader;
 }
 #endif
+
+void Context::initNexusFS(const Poco::Util::AbstractConfiguration & config)
+{
+    auto lock = getLock(); // checked
+
+    String config_name(NexusFSConfig::CONFIG_NAME);
+    bool enable = config.getBool(config_name + ".enable", false);
+    String policy_name = config.getString(config_name + ".policy", "default");
+    String volume_name = config.getString(config_name + ".volume", "local");
+
+    if (!enable)
+    {
+        shared->nexus_fs.reset();
+        return;
+    }
+    if (shared->nexus_fs)
+        throw Exception("NexusFS has been already initialized.", ErrorCodes::LOGICAL_ERROR);
+
+    NexusFSConfig conf;
+    auto disks = getStoragePolicy(policy_name)->getVolumeByName(volume_name, true)->getDisks();
+    for  (auto & disk : disks)
+    {
+        chassert(disk->getType() == DiskType::Type::Local);
+        conf.file_paths.push_back(std::filesystem::path(disk->getPath()) / NexusFSConfig::FILE_NAME);
+    }
+    conf.loadFromConfig(config);
+
+    shared->nexus_fs = std::make_unique<NexusFS>(std::move(conf));
+
+    if (shared->nexus_fs)
+    {
+        if (!shared->nexus_fs->recover())
+            LOG_WARNING(&Poco::Logger::get("NexusFS"), "No recovery data found. Setup with clean cache.");
+    }
+    else
+        LOG_ERROR(shared->log, "Fail to initialize NexusFS.");
+}
+
+NexusFSPtr Context::getNexusFS() const
+{
+    return shared->nexus_fs;
+}
+
 }

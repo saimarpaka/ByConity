@@ -24,7 +24,7 @@
 #include <Storages/MergeTree/IMergeTreeReader.h>
 #include <Interpreters/Context.h>
 #include <Storages/MergeTree/FilterWithRowUtils.h>
-
+#include <roaring.hh>
 
 namespace DB
 {
@@ -44,7 +44,7 @@ MergeTreeSelectProcessor::MergeTreeSelectProcessor(
     bool check_columns_,
     const MergeTreeStreamSettings & stream_settings_,
     const Names & virt_column_names_,
-    bool quiet)
+    const MarkRangesFilterCallback& range_filter_callback_)
     :
     MergeTreeBaseSelectProcessor{
         storage_snapshot_->getSampleBlockForColumns(required_columns_),
@@ -52,16 +52,16 @@ MergeTreeSelectProcessor::MergeTreeSelectProcessor(
     required_columns{std::move(required_columns_)},
     part_detail{part_detail_},
     delete_bitmap_getter(std::move(delete_bitmap_getter_)),
+    mark_ranges_filter_callback(range_filter_callback_),
     check_columns(check_columns_)
 {
     /// Let's estimate total number of rows for progress bar.
     total_marks_count = part_detail.getMarksCount();
 
     size_t total_rows = part_detail.getRowsCount();
-    if (!quiet)
-        LOG_DEBUG(log, "Reading {} ranges from part {}, approx. {} rows starting from {}",
-            part_detail.ranges.size(), part_detail.data_part->name, total_rows,
-            part_detail.data_part->index_granularity.getMarkStartingRow(part_detail.ranges.front().begin));
+    LOG_DEBUG(log, "Reading {} ranges from part {}, approx. {} rows starting from {}",
+        part_detail.ranges.size(), part_detail.data_part->name, total_rows,
+        part_detail.data_part->index_granularity.getMarkStartingRow(part_detail.ranges.front().begin));
 
     addTotalRowsApprox(total_rows);
     ordered_names = header_without_virtual_columns.getNames();
@@ -76,6 +76,10 @@ try
     {
         finish();
         return false;
+    }
+    if (is_first_task)
+    {
+        firstTaskInitialization();
     }
     is_first_task = false;
 
@@ -92,7 +96,7 @@ try
     column_name_set = NameSet{column_names.begin(), column_names.end()};
 
     task = std::make_unique<MergeTreeReadTask>(
-        part_detail.data_part, getDeleteBitmap(), part_detail.ranges, part_detail.part_index_in_query, ordered_names, column_name_set, task_columns,
+        part_detail.data_part, delete_bitmap, part_detail.ranges, part_detail.part_index_in_query, ordered_names, column_name_set, task_columns,
         prewhere_info && prewhere_info->remove_prewhere_column, task_columns.should_reorder, std::move(size_predictor), part_detail.ranges);
 
     if (!reader)
@@ -108,14 +112,32 @@ catch (...)
     throw;
 }
 
-ImmutableDeleteBitmapPtr MergeTreeSelectProcessor::getDeleteBitmap()
+void MergeTreeSelectProcessor::firstTaskInitialization()
 {
-    if (delete_bitmap_initialized)
-        return delete_bitmap;
-
+    std::unique_ptr<roaring::Roaring> row_filter = nullptr;
+    if (mark_ranges_filter_callback)
+    {
+        if (stream_settings.reader_settings.read_settings.filtered_ratio_to_use_skip_read > 0)
+        {
+            row_filter = std::make_unique<roaring::Roaring>();
+        }
+        part_detail.ranges = mark_ranges_filter_callback(part_detail.data_part,
+            part_detail.ranges, row_filter.get());
+    }
     delete_bitmap = combineFilterBitmap(part_detail, delete_bitmap_getter);
-    delete_bitmap_initialized = true;
-    return delete_bitmap;
+    if (row_filter != nullptr)
+    {
+        flipFilterWithMarkRanges(part_detail.ranges,
+            part_detail.data_part->index_granularity, *row_filter);
+        if (delete_bitmap == nullptr)
+        {
+            delete_bitmap = std::shared_ptr<roaring::Roaring>(row_filter.release());
+        }
+        else
+        {
+            *delete_bitmap &= *row_filter;
+        }
+    }
 }
 
 void MergeTreeSelectProcessor::finish()

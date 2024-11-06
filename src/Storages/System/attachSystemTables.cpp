@@ -27,6 +27,7 @@
 
 #include <Storages/System/StorageSystemAggregateFunctionCombinators.h>
 #include <Storages/System/StorageSystemAsynchronousMetrics.h>
+#include <Storages/System/StorageSystemCnchBackups.h>
 #include <Storages/System/StorageSystemBuildOptions.h>
 #include <Storages/System/StorageSystemCollations.h>
 #include <Storages/System/StorageSystemClusters.h>
@@ -51,6 +52,7 @@
 #include <Storages/System/StorageSystemModels.h>
 #include <Storages/System/StorageSystemMutations.h>
 #include <Storages/System/StorageSystemNumbers.h>
+#include <Storages/System/StorageSystemNexusFS.h>
 #include <Storages/System/StorageSystemOne.h>
 #include <Storages/System/StorageSystemPartMovesBetweenShards.h>
 #include <Storages/System/StorageSystemParts.h>
@@ -167,6 +169,7 @@
 #include <Storages/System/StorageSystemCnchMaterializedMySQL.h>
 #include <Storages/System/StorageSystemCnchTransactionCleanTasks.h>
 #include <Storages/System/StorageSystemSchemaInferenceCache.h>
+#include <Storages/System/StorageSystemBGTaskStatistics.h>
 
 namespace DB
 {
@@ -224,6 +227,7 @@ void attachSystemTablesLocal(IDatabase & system_database)
 #endif
     attach<StorageSystemIOSchedulers>(system_database, "io_schedulers");
     attach<StorageSystemIOWorkers>(system_database, "io_workers");
+    attach<StorageSystemNexusFS>(system_database, "nexus_fs");
 
 }
 
@@ -290,6 +294,7 @@ void attachSystemTablesServer(IDatabase & system_database, bool has_zookeeper)
     attach<StorageSystemCnchViewTables>(system_database, "cnch_view_tables");
     attach<StorageSystemCnchManipulations>(system_database, "cnch_manipulations");
     attach<StorageSystemCnchSnapshots>(system_database, "cnch_snapshots");
+    attach<StorageSystemCnchBackups>(system_database, "cnch_backups");
     attach<StorageSystemCnchUserPriv>(system_database, "cnch_user_priv");
     attach<StorageSystemCnchDBPriv>(system_database, "cnch_db_priv");
     attach<StorageSystemDMBGJobs>(system_database, "dm_bg_jobs");
@@ -320,6 +325,8 @@ void attachSystemTablesServer(IDatabase & system_database, bool has_zookeeper)
 #endif
     attach<StorageSystemCnchTransactionCleanTasks>(system_database, "cnch_transaction_clean_tasks");
     attach<StorageSystemSchemaInferenceCache>(system_database, "schema_inference_cache");
+    attach<StorageSystemBGTaskStatistics>(system_database, "bg_task_statistics");
+
 }
 
 void attachSystemTablesAsync(IDatabase & system_database, AsynchronousMetrics & async_metrics)

@@ -79,7 +79,7 @@ auto PartMergerImpl::createStorages(const std::vector<String> & uuids, const Str
     return res;
 }
 
-PartMergerImpl::PartMergerImpl(ContextMutablePtr context_, Poco::Util::AbstractConfiguration & config, Poco::Logger * log_)
+PartMergerImpl::PartMergerImpl(ContextMutablePtr context_, Poco::Util::AbstractConfiguration & config, LoggerPtr log_)
     : PartToolkitBase(nullptr, context_), log(log_)
 {
     // Init arguments passed from CLI.
@@ -127,6 +127,7 @@ PartMergerImpl::PartMergerImpl(ContextMutablePtr context_, Poco::Util::AbstractC
     mergetree_settings.set("min_rows_for_compact_part", 0);
     mergetree_settings.set("min_bytes_for_compact_part", 0);
     mergetree_settings.set("enable_local_disk_cache", 0);
+    mergetree_settings.set("enable_nexus_fs", 0);
     settings.set("input_format_skip_unknown_fields", true);
     settings.set("skip_nullinput_notnull_col", true);
 
@@ -399,7 +400,7 @@ IMergeTreeDataPartsVector PartMergerImpl::collectSourceParts(const std::vector<S
             pool.scheduleOrThrowOnError(createExceptionHandledJob(
                 [&merge_tree, new_name, &volume, part_name, &parts, &lock]() {
                     auto part = std::make_shared<MergeTreeDataPartCNCH>(*merge_tree, new_name, volume, part_name + '/');
-                    part->loadFromFileSystem(false);
+                    part->loadFromFileSystem();
                     part->disk_cache_mode = DiskCacheMode::SKIP_DISK_CACHE;
 
                     // See https://xxx

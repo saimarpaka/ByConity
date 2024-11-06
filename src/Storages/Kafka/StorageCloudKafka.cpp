@@ -54,6 +54,7 @@ namespace ErrorCodes
     extern const int BRPC_TIMEOUT;
     extern const int CNCH_KAFKA_TASK_NEED_STOP;
     extern const int RDKAFKA_EXCEPTION;
+    extern const int TOO_MANY_PARTS;
 }
 
 namespace
@@ -77,7 +78,7 @@ StorageCloudKafka::StorageCloudKafka
      : IStorageCnchKafka(table_id_, context_, setting_changes_, settings_, columns_, constraints_),
      settings_adjustments(createSettingsAdjustments()),
      server_client_address(HostWithPorts::fromRPCAddress(addBracketsIfIpv6(server_client_host_) + ':' + toString(server_client_rpc_port_))),
-       log(&Poco::Logger::get(table_id_.getNameForLogs()  + " (StorageCloudKafka)")),
+       log(getLogger(table_id_.getNameForLogs()  + " (StorageCloudKafka)")),
        ////check_staged_area_task(context_->getCheckStagedAreaSchedulePool().createTask(log->name(), [this] { checkStagedArea(); })),
        check_staged_area_reschedule_ms(CHECK_STAGED_AREA_RESCHEDULE_MIN_MS)
 {
@@ -450,7 +451,7 @@ void StorageCloudKafka::streamThread()
             if (!streamToViews())
                 break;
         }
-        rdkafka_exception_times = 0;
+        need_delay_exception_times = 0;
     }
     catch (const Exception & e)
     {
@@ -464,7 +465,7 @@ void StorageCloudKafka::streamThread()
             ThreadFromGlobalPool([c = getContext(), db = database, tb = table] {
                 try
                 {
-                    LOG_DEBUG(&Poco::Logger::get("SelfDropKafkaTable"), "Self-drop table: {}.{}", db, tb);
+                    LOG_DEBUG(getLogger("SelfDropKafkaTable"), "Self-drop table: {}.{}", db, tb);
                     /// Copy context in case the global_context would be invalid if the consumer is dropped
                     auto drop_context = Context::createCopy(c);
                     dropConsumerTables(drop_context, db, tb);
@@ -476,9 +477,9 @@ void StorageCloudKafka::streamThread()
             }).detach();
             return;
         }
-        else if (e.code() == ErrorCodes::RDKAFKA_EXCEPTION)
+        else if (e.code() == ErrorCodes::RDKAFKA_EXCEPTION || e.code() == ErrorCodes::TOO_MANY_PARTS)
         {
-            rdkafka_exception_times = std::min(10ul, rdkafka_exception_times + 1);
+            need_delay_exception_times = std::min(10ul, need_delay_exception_times + 1);
         }
 
         process_exception();
@@ -489,7 +490,7 @@ void StorageCloudKafka::streamThread()
     }
 
     if (stream_run)
-        consumer_context.task->scheduleAfter(STREAM_RESCHEDULE_MS * (1 << rdkafka_exception_times));
+        consumer_context.task->scheduleAfter(STREAM_RESCHEDULE_MS * (1 << need_delay_exception_times));
 }
 
 bool StorageCloudKafka::streamToViews(/* required_column_names */)
@@ -538,7 +539,7 @@ bool StorageCloudKafka::streamToViews(/* required_column_names */)
         auto txn = std::make_shared<CnchWorkerTransaction>(consume_context, server_client, table_id, assigned_consumer_index);
         if (number_tables_to_write > 1)
         {
-            LOG_DEBUG(&Poco::Logger::get("CnchKafkaWorker"), "Enable explicit commit txn while consumer needs to write {} tables", number_tables_to_write);
+            LOG_DEBUG(getLogger("CnchKafkaWorker"), "Enable explicit commit txn while consumer needs to write {} tables", number_tables_to_write);
             txn->enableExplicitCommit();
             txn->setExplicitCommitStorageID(getStorageID());
         }
@@ -785,10 +786,6 @@ SettingsChanges StorageCloudKafka::createSettingsAdjustments()
     if (!settings.avro_schema_registry_url.value.empty())
         result.emplace_back("format_avro_schema_registry_url", settings.avro_schema_registry_url.value);
 
-    /// enable to read JSON object as Strings if you required by changing the setting of CnchKafka
-    if (settings.input_format_json_read_objects_as_strings.changed)
-        result.emplace_back("input_format_json_read_objects_as_strings", settings.input_format_json_read_objects_as_strings.value);
-
     /// Forbidden parallel parsing for Kafka in case of global setting.
     /// Kafka cannot support parallel parsing due to virtual column
     result.emplace_back("input_format_parallel_parsing", false);
@@ -797,6 +794,19 @@ SettingsChanges StorageCloudKafka::createSettingsAdjustments()
     result.emplace_back("input_format_protobuf_enable_multiple_message", settings.protobuf_enable_multiple_message.value);
     result.emplace_back("input_format_protobuf_default_length_parser", settings.protobuf_default_length_parser.value);
 
+    /// Set whether to use partial update mode for unique table
+    result.emplace_back("enable_unique_partial_update", settings.enable_unique_partial_update.value);
+
+    /// Add settings from the format factory
+    for (const auto & setting : settings)
+    {
+        const auto & name = setting.getName();
+        if (setting.isValueChanged() && settings.isFormatFactorySetting(name))
+        {
+            /// Use `insertSetting` to avoid adding duplicated settings
+            result.insertSetting(name, setting.getValue());
+        }
+    }
     return result;
 }
 
@@ -934,7 +944,7 @@ void dropConsumerTables(ContextMutablePtr context, const String & db_name, const
     auto dependencies = DatabaseCatalog::instance().getDependencies({db_name, tb_name});
     if (dependencies.empty())
     {
-        LOG_DEBUG(&Poco::Logger::get("CnchKafkaWorker"), "No dependencies found for " + db_name + "." + tb_name);
+        LOG_DEBUG(getLogger("CnchKafkaWorker"), "No dependencies found for " + db_name + "." + tb_name);
         tables_to_drop.emplace(backQuoteIfNeed(db_name)  + "." + backQuoteIfNeed(tb_name));
     }
     else
@@ -950,7 +960,7 @@ void dropConsumerTables(ContextMutablePtr context, const String & db_name, const
     for (const auto & table_to_drop : tables_to_drop)
     {
         String drop_table_command = "DROP TABLE IF EXISTS " + table_to_drop;
-        LOG_DEBUG(&Poco::Logger::get("CnchKafkaWorker"), "DROP table : {}", drop_table_command);
+        LOG_DEBUG(getLogger("CnchKafkaWorker"), "DROP table : {}", drop_table_command);
 
         try
         {
@@ -975,14 +985,14 @@ void createConsumerTables(const std::vector<String> & create_table_commands, Con
     ParserCreateQuery parser;
     for (const auto & cmd : create_table_commands)
     {
-        LOG_DEBUG(&Poco::Logger::get("CnchKafkaWorker"), "CREATE local table: {}", cmd);
+        LOG_DEBUG(getLogger("CnchKafkaWorker"), "CREATE local table: {}", cmd);
         ASTPtr ast = parseQuery(parser, cmd, global_context->getSettings().max_query_size,
                                 global_context->getSettings().max_parser_depth);
 
         InterpreterCreateQuery interpreter_tb(ast, create_context);
         interpreter_tb.execute();
     }
-    LOG_DEBUG(&Poco::Logger::get("CnchKafkaWorker"), "CREATE local tables on worker successfully");
+    LOG_DEBUG(getLogger("CnchKafkaWorker"), "CREATE local tables on worker successfully");
 }
 
 void executeKafkaConsumeTaskImpl(const KafkaTaskCommand & command, ContextMutablePtr context)
@@ -1054,7 +1064,7 @@ void executeKafkaConsumeTask(const KafkaTaskCommand & command, ContextMutablePtr
         /// 2. Try to drop created local tables which can help trigger re-scheduling of ConsumeManager faster
         if (command.type == KafkaTaskCommand::Type::START_CONSUME)
         {
-            LOG_INFO(&Poco::Logger::get("KafkaConsumerTaskExecutor"), "Failed to execute START_CONSUME task, try to drop local tables");
+            LOG_INFO(getLogger("KafkaConsumerTaskExecutor"), "Failed to execute START_CONSUME task, try to drop local tables");
             try
             {
                 dropConsumerTables(context, command.local_database_name, command.local_table_name);

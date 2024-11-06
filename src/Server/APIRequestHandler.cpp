@@ -14,6 +14,8 @@
 #include <IO/ReadBufferFromIStream.h>
 #include <IO/ReadBufferFromString.h>
 #include <IO/WriteBufferFromFile.h>
+#include <Server/HTTP/HTTPRequestHandlerFactory.h>
+#include <Server/HTTPHandlerFactory.h>
 #include <Server/HTTP/WriteBufferFromHTTPServerResponse.h>
 #include <IO/WriteBufferFromString.h>
 #include <IO/WriteBufferFromTemporaryFile.h>
@@ -96,12 +98,12 @@ namespace ErrorCodes
 }
 
 APIRequestHandler::APIRequestHandler(IServer & server)
-    : WithMutableContext(server.context()), log(&Poco::Logger::get("HTTPHandler for API"))
+    : WithMutableContext(server.context()), log(getLogger("HTTPHandler for API"))
 {
     server_display_name = getContext()->getConfigRef().getString("display_name", getFQDNOrHostName());
 }
 
-[[maybe_unused]] static Poco::Net::HTTPResponse::HTTPStatus exceptionCodeToHTTPStatus(int exception_code)
+static Poco::Net::HTTPResponse::HTTPStatus exceptionCodeToHTTPStatus(int exception_code)
 {
     using namespace Poco::Net;
 
@@ -271,6 +273,13 @@ void APIRequestHandler::onResourceReportAction(
         res.add("exception", e.message());
     }
     sendResult(res, response);
+}
+
+HTTPRequestHandlerFactoryPtr createAPIRequestHandlerFactory(IServer & server, const std::string & config_prefix)
+{
+    auto factory = std::make_shared<HandlingRuleHTTPHandlerFactory<APIRequestHandler>>(server);
+    factory->addFiltersFromConfig(server.config(), config_prefix);
+    return factory;
 }
 
 }

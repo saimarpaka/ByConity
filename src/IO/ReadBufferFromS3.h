@@ -45,7 +45,7 @@ public:
         const String & key_,
         const ReadSettings & read_settings,
         UInt64 max_single_read_retries_ = 3,
-        bool restricted_seek_ = true,
+        bool restricted_seek_ = false,
         bool use_external_buffer_ = false,
         off_t read_until_position = 0,
         std::optional<size_t> file_size = std::nullopt);

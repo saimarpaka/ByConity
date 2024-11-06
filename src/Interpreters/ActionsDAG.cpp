@@ -556,6 +556,9 @@ void ActionsDAG::removeUnusedActions(bool allow_remove_inputs, bool allow_consta
     std::unordered_set<const Node *> used_inputs;
     std::stack<Node *> stack;
 
+    for (const auto * input : inputs)
+        used_inputs.insert(input);
+    
     for (const auto * node : outputs)
     {
         visited_nodes.insert(node);

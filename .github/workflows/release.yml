@@ -57,7 +57,7 @@ jobs:
       - name: Tag as Stable then push to Docker Hub.
         if: "!github.event.release.prerelease"
         run: |
-          docker tag saimarpaka/byconity:${{ github.ref_name }} byconity/byconity:stable
+          docker tag saimarpaka/byconity:${{ github.ref_name }} saimarpaka/byconity:stable
           docker push saimarpaka/byconity:stable
           docker image rm -f saimarpaka/byconity:stable
       - name: Cleanup Data.

@@ -135,33 +135,42 @@ static Array extractMapColumnKeys(const MergeTreeMetaBase & data, const MergeTre
             map_types[it->name] = it->type;
     }
 
+    phmap::flat_hash_set<String> implicit_column_files;
+
     LoggerPtr logger = nullptr;
     for (auto & part : parts)
     {
         for (auto & [file, _] : part->getChecksums()->files)
         {
-            if (!isMapImplicitKey(file) || isMapBaseFile(file))
-                continue;
-
-            String map_name = parseMapNameFromImplicitFileName(file);
-            if (!isMapImplicitDataFileNameNotBaseOfSpecialMapName(file, map_name))
-                continue;
-            String key_name = parseKeyNameFromImplicitFileName(file, map_name);
-
-            if (!map_types.count(map_name))
-            {
-                if (unlikely(logger == nullptr))
-                    logger = getLogger(data.getLogName() + " (ExtractMapKeys)");
-                LOG_WARNING(logger, "Can not find byte map column {} of implicit file {}", map_name, file);
-                continue;
-            }
-            auto type = map_types[map_name];
-            auto map_key_type = static_cast<const DataTypeMap *>(type.get())->getKeyType();
-            if (!map_keys.count(map_name))
-                map_keys[map_name] = IColumn::mutate(map_key_type->createColumn());
-
-            map_keys[map_name]->insert(map_key_type->stringToVisitorField(key_name));
+            /// Parsing map keys from file name is a little heavy, so we remove duplicate file names first.
+            if (isMapImplicitKey(file))
+                implicit_column_files.insert(file);
         }
+    }
+
+    for (const auto & file: implicit_column_files)
+    {
+        if (isMapBaseFile(file))
+            continue;
+
+        String map_name = parseMapNameFromImplicitFileName(file);
+        if (!isMapImplicitDataFileNameNotBaseOfSpecialMapName(file, map_name))
+            continue;
+        String key_name = parseKeyNameFromImplicitFileName(file, map_name);
+
+        if (!map_types.count(map_name))
+        {
+            if (unlikely(logger == nullptr))
+                logger = getLogger(data.getLogName() + " (ExtractMapKeys)");
+            LOG_WARNING(logger, "Can not find byte map column {} of implicit file {}", map_name, file);
+            continue;
+        }
+        auto type = map_types[map_name];
+        auto map_key_type = static_cast<const DataTypeMap *>(type.get())->getKeyType();
+        if (!map_keys.count(map_name))
+            map_keys[map_name] = IColumn::mutate(map_key_type->createColumn());
+
+        map_keys[map_name]->insert(map_key_type->stringToVisitorField(key_name));
     }
 
     for (auto & [map_name, column] : map_keys)
@@ -326,9 +335,11 @@ ReadFromMergeTree::ReadFromMergeTree(
     , metadata_for_reading(storage_snapshot->getMetadataForQuery())
     , context(std::move(context_))
     , max_block_size(max_block_size_)
+    , min_block_size(context->getSettingsRef().min_block_size)
     , requested_num_streams(num_streams_)
     , preferred_block_size_bytes(context->getSettingsRef().preferred_block_size_bytes)
     , preferred_max_column_in_block_size_bytes(context->getSettingsRef().preferred_max_column_in_block_size_bytes)
+    , size_predictor_estimate_lc_size_by_fullstate(context->getSettingsRef().size_predictor_estimate_lc_size_by_fullstate)
     , sample_factor_column_queried(sample_factor_column_queried_)
     , map_column_keys_column_queried(map_column_keys_column_queried_)
     , max_block_numbers_to_read(std::move(max_block_numbers_to_read_))
@@ -390,8 +401,10 @@ Pipe ReadFromMergeTree::readFromPool(
     MergeTreeStreamSettings stream_settings {
         .min_marks_for_concurrent_read = min_marks_for_concurrent_read,
         .max_block_size = max_block_size,
+        .min_block_size = min_block_size,
         .preferred_block_size_bytes = settings.preferred_block_size_bytes,
         .preferred_max_column_in_block_size_bytes = settings.preferred_max_column_in_block_size_bytes,
+        .size_predictor_estimate_lc_size_by_fullstate = settings.size_predictor_estimate_lc_size_by_fullstate,
         .use_uncompressed_cache = use_uncompressed_cache,
         .actions_settings = actions_settings,
         .reader_settings = reader_settings
@@ -461,8 +474,10 @@ Pipe ReadFromMergeTree::readInOrder(
     Pipes pipes;
     MergeTreeStreamSettings stream_settings{
         .max_block_size = max_block_size,
+        .min_block_size = min_block_size,
         .preferred_block_size_bytes = preferred_block_size_bytes,
         .preferred_max_column_in_block_size_bytes = preferred_max_column_in_block_size_bytes,
+        .size_predictor_estimate_lc_size_by_fullstate = size_predictor_estimate_lc_size_by_fullstate,
         .use_uncompressed_cache = use_uncompressed_cache,
         .actions_settings = actions_settings,
         .reader_settings = reader_settings
@@ -1346,6 +1361,9 @@ MergeTreeDataSelectAnalysisResultPtr ReadFromMergeTree::selectRangesToRead(
             result.sampling.use_sampling,
             result.sampling.relative_sample_size);
 
+        if (settings.query_dry_run_mode == QueryDryRunMode::SKIP_READ_PARTS)
+            result.parts_with_ranges.clear();
+
         result.parts_with_ranges = MergeTreeDataSelectExecutor::filterPartsByIntermediateResultCache(
             data.getStorageID(),
             query_info,
@@ -1604,6 +1622,7 @@ void ReadFromMergeTree::initializePipeline(QueryPipeline & pipeline, const Build
         column.name = "_map_column_keys";
         column.type = std::make_shared<DataTypeArray>(
             std::make_shared<DataTypeTuple>(DataTypes{std::make_shared<DataTypeString>(), std::make_shared<DataTypeString>()}));
+
         column.column = column.type->createColumnConst(0, Field(extractMapColumnKeys(data, selected_parts_vector)));
 
         auto adding_column = ActionsDAG::makeAddingColumnActions(std::move(column));

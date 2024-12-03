@@ -146,6 +146,8 @@ protected:
 using ParserColumnDeclaration = IParserColumnDeclaration<ParserIdentifier>;
 using ParserCompoundColumnDeclaration = IParserColumnDeclaration<ParserCompoundIdentifier>;
 
+bool containsMap(const ASTPtr & ast);
+
 template <typename NameParser>
 bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, Expected & expected)
 {
@@ -153,6 +155,7 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
     ParserDataType type_parser(dt);
     ParserKeyword s_default{"DEFAULT"};
     ParserKeyword s_auto_increment{"AUTO_INCREMENT"};
+    ParserKeyword s_replace_if_not_null{"REPLACE_IF_NOT_NULL"};
     ParserKeyword s_null{"NULL"};
     ParserKeyword s_not{"NOT"};
     ParserKeyword s_pk{"PRIMARY KEY"};
@@ -244,6 +247,7 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
         && !s_pk.checkWithoutMoving(pos, expected)
         && !s_default.checkWithoutMoving(pos, expected)
         && !s_auto_increment.checkWithoutMoving(pos, expected)
+        && !s_replace_if_not_null.checkWithoutMoving(pos, expected)
         && !s_materialized.checkWithoutMoving(pos, expected)
         && !s_alias.checkWithoutMoving(pos, expected)
         && (require_type
@@ -324,6 +328,11 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
         column_declaration->mysql_primary_key = true;
     }
 
+    if (s_replace_if_not_null.ignore(pos, expected))
+    {
+        column_declaration->replace_if_not_null = true;
+    }
+
     if (s_comment.ignore(pos, expected))
     {
         /// should be followed by a string literal
@@ -366,6 +375,18 @@ bool IParserColumnDeclaration<NameParser>::parseImpl(Pos & pos, ASTPtr & node, E
         /// map kv flag and map byte flag cannot be set at the same time
         if ((flags & TYPE_MAP_KV_STORE_FLAG) && (flags & TYPE_MAP_BYTE_STORE_FLAG))
             return false;
+    }
+
+    if (dt.parse_mysql_ddl && type)
+    {
+        if (containsMap(type))
+        {
+            /// If Map type is not declared as Byte Map explicity, use KV Map in MYSQL.
+            if (!(flags & TYPE_MAP_KV_STORE_FLAG) && !(flags & TYPE_MAP_BYTE_STORE_FLAG))
+            {
+                flags |= TYPE_MAP_KV_STORE_FLAG;
+            }
+        }
     }
 
     column_declaration->flags = flags;

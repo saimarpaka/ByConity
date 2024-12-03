@@ -72,7 +72,7 @@ void executePlanSegmentInternal(
         throw Exception("Cannot execute empty plan segment", ErrorCodes::LOGICAL_ERROR);
 
     const auto & settings = context->getSettingsRef();
-    if (settings.debug_plan_generation)
+    if (settings.query_dry_run_mode == QueryDryRunMode::SKIP_EXECUTE_SEGMENT)
         return;
 
     bool inform_success_status = settings.enable_wait_for_post_processing || settings.bsp_mode || settings.report_segment_profiles;
@@ -104,16 +104,21 @@ static void OnSendPlanSegmentCallback(
     std::shared_ptr<RpcClient> rpc_channel,
     WorkerStatusManagerPtr worker_status_manager,
     AsyncContextPtr async_context,
-    WorkerId worker_id)
+    WorkerId worker_id,
+    WorkerGroupStatusPtr worker_group_status)
 {
     std::unique_ptr<brpc::Controller> cntl_guard(cntl);
     std::unique_ptr<Protos::ExecutePlanSegmentResponse> response_guard(response);
 
-    if (response->has_exception() || cntl->Failed())
-        worker_status_manager->setWorkerNodeDead(worker_id, cntl->ErrorCode());
-    else if (response->has_worker_resource_data())
-        worker_status_manager->updateWorkerNode(response->worker_resource_data(), WorkerStatusManager::UpdateSource::ComeFromWorker);
-
+    if (worker_status_manager && worker_group_status)
+    {
+        if (response->has_exception() || cntl->Failed())
+            worker_status_manager->setWorkerNodeDead(worker_id, cntl->ErrorCode());
+        else if (response->has_worker_resource_data())
+            worker_status_manager->updateWorkerNode(response->worker_resource_data(), WorkerStatusManager::UpdateSource::ComeFromWorker);
+        if (worker_group_status->needCheckHalfOpenWorker())
+            worker_group_status->removeHalfOpenWorker(worker_id);
+    }
     rpc_channel->checkAliveWithController(*cntl);
     AsyncContext::AsyncResult result;
     if (cntl->Failed())
@@ -132,7 +137,7 @@ static void OnSendPlanSegmentCallback(
     }
     else
     {
-        LOG_TRACE(getLogger("executePlanSegment"), "Send plansegment to {} success", butil::endpoint2str(cntl->remote_side()).c_str());
+        LOG_TRACE(getLogger("executePlanSegment"), "Send plansegment to {} success , response {}", butil::endpoint2str(cntl->remote_side()).c_str(),response->ShortDebugString());
         async_context->asyncComplete(cntl->call_id(), result);
     }
 }
@@ -238,7 +243,7 @@ void executePlanSegmentRemotelyWithPreparedBuf(
     cntl->request_attachment().append(attachment.movable());
     cntl->set_timeout_ms(context.getSettingsRef().send_plan_segment_timeout_ms.totalMilliseconds());
     google::protobuf::Closure * done = brpc::NewCallback(
-        &OnSendPlanSegmentCallback, response, cntl, std::move(rpc_channel), context.getWorkerStatusManager(), async_context, worker_id);
+        &OnSendPlanSegmentCallback, response, cntl, std::move(rpc_channel), context.getWorkerStatusManager(), async_context, worker_id, context.getWorkerGroupStatusPtr());
     async_context->addCallId(call_id);
     manager_stub.submitPlanSegment(cntl, &request, response, done);
 }
@@ -246,6 +251,7 @@ void executePlanSegmentRemotelyWithPreparedBuf(
 void executePlanSegmentsRemotely(
     const AddressInfo & address_info,
     const PlanSegmentHeaders & plan_segment_headers,
+    const butil::IOBuf & query_resource_buf,
     const butil::IOBuf & query_common_buf,
     const butil::IOBuf & query_settings_buf,
     AsyncContextPtr & async_context,
@@ -256,12 +262,25 @@ void executePlanSegmentsRemotely(
     auto rpc_channel = RpcChannelPool::getInstance().getClient(execute_address, BrpcChannelPoolOptions::DEFAULT_CONFIG_KEY);
     Protos::PlanSegmentManagerService_Stub manager_stub(&rpc_channel->getChannel());
 
-    // common
     Protos::SubmitPlanSegmentsRequest request;
     request.set_brpc_protocol_major_revision(DBMS_BRPC_PROTOCOL_MAJOR_VERSION);
     address_info.toProto(*request.mutable_execution_address());
 
     butil::IOBuf attachment;
+    size_t send_timeout_ms = context.getSettingsRef().send_plan_segment_timeout_ms.totalMilliseconds();
+    // query resource
+    if (context.getSettingsRef().enable_batch_send_resources_together)
+    {
+        /// send_timeout refers to the time to send resource to worker
+        /// If max_execution_time is not set, the send_timeout will be set to brpc_data_parts_timeout_ms
+        auto max_execution_time = context.getSettingsRef().max_execution_time.value.totalSeconds();
+        send_timeout_ms
+            += max_execution_time ? max_execution_time * 1000L : context.getSettingsRef().brpc_data_parts_timeout_ms.totalMilliseconds();
+        request.set_query_resource_size(query_resource_buf.size());
+        if (!query_resource_buf.empty())
+            attachment.append(query_resource_buf);
+    }
+    // common
     request.set_query_common_buf_size(query_common_buf.size());
     attachment.append(query_common_buf);
     request.set_query_settings_buf_size(query_settings_buf.size());
@@ -279,11 +298,11 @@ void executePlanSegmentsRemotely(
     /// async call
     auto * response = new Protos::ExecutePlanSegmentResponse;
     auto * cntl = new brpc::Controller;
-    cntl->set_timeout_ms(context.getSettingsRef().send_plan_segment_timeout_ms.totalMilliseconds());
+    cntl->set_timeout_ms(send_timeout_ms);
     auto call_id = cntl->call_id();
     cntl->request_attachment().append(attachment.movable());
     google::protobuf::Closure * done = brpc::NewCallback(
-        &OnSendPlanSegmentCallback, response, cntl, std::move(rpc_channel), context.getWorkerStatusManager(), async_context, worker_id);
+        &OnSendPlanSegmentCallback, response, cntl, std::move(rpc_channel), context.getWorkerStatusManager(), async_context, worker_id, context.getWorkerGroupStatusPtr());
     async_context->addCallId(call_id);
     manager_stub.submitPlanSegments(cntl, &request, response, done);
 }

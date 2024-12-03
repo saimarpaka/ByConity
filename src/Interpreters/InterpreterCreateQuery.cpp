@@ -55,6 +55,7 @@
 #include <Storages/StorageInMemoryMetadata.h>
 #include <Storages/MergeTree/MergeTreeData.h>
 #include <Storages/StorageMaterializedView.h>
+#include <Storages/DataLakes/StorageCnchLakeBase.h>
 
 #include <Interpreters/Context.h>
 #include <Interpreters/executeDDLQueryOnCluster.h>
@@ -492,6 +493,9 @@ ASTPtr InterpreterCreateQuery::formatColumns(const ColumnsDescription & columns,
             column_declaration->on_update_expression = column.on_update_expression->clone();
         }
 
+        if (column.replace_if_not_null)
+            column_declaration->replace_if_not_null = column.replace_if_not_null;
+
         if (!column.comment.empty())
         {
             column_declaration->comment = std::make_shared<ASTLiteral>(Field(column.comment));
@@ -739,6 +743,9 @@ ColumnsDescription InterpreterCreateQuery::getColumnsDescription(
             column.on_update_expression = getDefaultExpression(col_decl.on_update_expression);
         }
 
+        if (col_decl.replace_if_not_null)
+            column.replace_if_not_null = col_decl.replace_if_not_null;
+
         if (col_decl.comment)
             column.comment = col_decl.comment->as<ASTLiteral &>().value.get<String>();
 
@@ -911,9 +918,10 @@ InterpreterCreateQuery::TableProperties InterpreterCreateQuery::setProperties(AS
 
     if (create.ignore_bitengine_encode)
     {
-        /// there's no bitengine columns in table, just reset the flag
-        if (0 == processIgnoreBitEngineEncode(properties.columns))
-            create.ignore_bitengine_encode = false;
+        /// For BitEngineEncode EncodeNonBitEngineColumn, this
+        /// function will return 0, and `ignore_bitengine_encode`
+        /// cannot be set to false
+        processIgnoreBitEngineEncode(properties.columns);
     }
 
     /// Even if query has list of columns, canonicalize it (unfold Nested columns).
@@ -1669,11 +1677,30 @@ bool InterpreterCreateQuery::doCreateTable(ASTCreateQuery & create,
             properties.foreign_keys,
             properties.unique,
             false);
+
+        if (auto * storage_lake = dynamic_cast<StorageCnchLakeBase *>(res.get()); storage_lake)
+        {
+            storage_lake->checkSchema();
+        }
     }
 
     try
     {
-        res->checkMetadataValidity(properties.columns);
+        /// Some tables created in earlier versions may be invalid under new constraints, but we need to attach before fixing them.
+        if (!create.attach)
+        {
+            res->checkMetadataValidity(properties.columns);
+
+            /// We only want to check some recommended usages when creating table or modify corresponding column, so we need to check
+            /// this outside of MergeTreeMetaBase::checkMetadataValidity.
+            if (auto * storage = dynamic_cast<MergeTreeMetaBase *>(res.get()))
+            {
+                auto columns_physical = properties.columns.getAllPhysical();
+                for (const auto & column: columns_physical)
+                    MergeTreeMetaBase::checkTypeInComplianceWithRecommendedUsage(column.type);
+            }
+        }
+
     }
     catch (...)
     {

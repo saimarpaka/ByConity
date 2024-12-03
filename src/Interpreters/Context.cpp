@@ -214,12 +214,6 @@ namespace ProfileEvents
 {
 extern const Event ContextLock;
 extern const Event CompiledCacheSizeBytes;
-extern const Event AllWorkerSize;
-extern const Event HealthWorkerSize;
-extern const Event HeavyLoadWorkerSize;
-extern const Event SourceOnlyWorkerSize;
-extern const Event UnhealthWorkerSize;
-extern const Event NotConnectedWorkerSize;
 extern const Event SelectHealthWorkerMilliSeconds;
 }
 
@@ -479,9 +473,8 @@ struct ContextSharedPart
     /// Clusters for distributed tables
     /// Initialized on demand (on distributed storages initialization) since Settings should be initialized
     std::shared_ptr<Clusters> clusters;
-    ConfigurationPtr clusters_config;                        /// Stores updated configs
-    mutable std::mutex clusters_mutex;                       /// Guards clusters and clusters_config
-    WorkerStatusManagerPtr worker_status_manager;
+    ConfigurationPtr clusters_config; /// Stores updated configs
+    mutable std::mutex clusters_mutex; /// Guards clusters and clusters_config
     BindingCacheManagerPtr global_binding_cache_manager;
 
     mutable DeleteBitmapCachePtr delete_bitmap_cache; /// Cache of delete bitmaps
@@ -494,6 +487,9 @@ struct ContextSharedPart
     bool shutdown_called = false;
     bool restrict_tenanted_users_to_whitelist_settings = false;
     bool restrict_tenanted_users_to_privileged_operations = false;
+
+    mutable std::mutex extra_whitelist_settings_mutex;
+    std::unordered_set<String> extra_whitelist_settings;
 
     Stopwatch uptime_watch;
 
@@ -613,9 +609,6 @@ struct ContextSharedPart
 
         if (queue_manager)
             queue_manager->shutdown();
-
-        if (worker_status_manager)
-            worker_status_manager->shutdown();
 
         if (cnch_catalog)
             cnch_catalog->shutDown();
@@ -781,57 +774,39 @@ ContextMutablePtr Context::createCopy(const ContextMutablePtr & other)
 
 Context::~Context() = default;
 
-WorkerStatusManagerPtr Context::getWorkerStatusManager()
-{
-    auto lock = getLock(); // checked
-    if (!shared->worker_status_manager)
-        shared->worker_status_manager = std::make_shared<WorkerStatusManager>(global_context);
-    return shared->worker_status_manager;
-}
-
-void Context::updateAdaptiveSchdulerConfig()
-{
-    getWorkerStatusManager()->updateConfig(getRootConfig().adaptive_scheduler);
-}
-
 WorkerStatusManagerPtr Context::getWorkerStatusManager() const
 {
-    auto lock = getLock(); // checked
-    if (!shared->worker_status_manager)
-        shared->worker_status_manager = std::make_shared<WorkerStatusManager>(global_context);
-    return shared->worker_status_manager;
+    return worker_status_manager;
 }
 
-void Context::selectWorkerNodesWithMetrics()
+void Context::setWorkerStatusManager()
 {
-    if (tryGetCurrentWorkerGroup())
+    if (tryGetCurrentWorkerGroup() && tryGetCurrentVW())
     {
-        Stopwatch sw;
-        worker_group_status = getWorkerStatusManager()->getWorkerGroupStatus(this,
-            current_worker_group->getHostWithPortsVec(), current_worker_group->getVWName(),  current_worker_group->getID(),
-            [](const String & vw, const String & wg, const HostWithPorts & host_ports){
-                return WorkerStatusManager::getWorkerId(vw, wg, host_ports.id);
-            });
-
-        auto indices = worker_group_status->selectHealthNode(current_worker_group->getHostWithPortsVec());
-        if (indices)
-        {
-            health_worker_group.reset(new WorkerGroupHandleImpl(*current_worker_group, *indices));
-            setCurrentWorkerGroup(health_worker_group);
-        }
-        ProfileEvents::increment(ProfileEvents::AllWorkerSize, worker_group_status->getAllWorkerSize());
-        ProfileEvents::increment(ProfileEvents::HeavyLoadWorkerSize, worker_group_status->getHeavyLoadWorkerSize());
-        ProfileEvents::increment(ProfileEvents::SourceOnlyWorkerSize, worker_group_status->getOnlySourceWorkerSize());
-        ProfileEvents::increment(ProfileEvents::UnhealthWorkerSize, worker_group_status->getUnhealthWorkerSize());
-        ProfileEvents::increment(ProfileEvents::HealthWorkerSize, worker_group_status->getHealthWorkerSize());
-        ProfileEvents::increment(ProfileEvents::NotConnectedWorkerSize, worker_group_status->getNotConnectedWorkerSize());
-        ProfileEvents::increment(ProfileEvents::SelectHealthWorkerMilliSeconds, sw.elapsedMilliseconds());
+        worker_status_manager = current_vw->getWorkerStatusManager(current_worker_group->getID());
     }
 }
 
-WorkerGroupHandle Context::tryGetHealthWorkerGroup() const
+void Context::adaptiveSelectWorkers(SchedulerMode mode)
 {
-    return health_worker_group;
+    if (tryGetCurrentWorkerGroup() && tryGetCurrentVW())
+    {
+        Stopwatch sw;
+        worker_status_manager = current_vw->getWorkerStatusManager(current_worker_group->getID());
+        std::vector<WorkerId> worker_ids;
+        worker_ids.reserve(current_worker_group->size());
+        for (const auto & host_ports : current_worker_group->getHostWithPortsVec())
+            worker_ids.emplace_back(
+                WorkerStatusManager::getWorkerId(current_worker_group->getVWName(), current_worker_group->getID(), host_ports.id));
+
+        worker_group_status = worker_status_manager->getWorkerGroupStatus(worker_ids, mode);
+
+        auto indices = worker_group_status->selectHealthNode(current_worker_group->getHostWithPortsVec());
+        if (indices)
+            setCurrentWorkerGroup(std::make_shared<WorkerGroupHandleImpl>(*current_worker_group, *indices));
+
+        ProfileEvents::increment(ProfileEvents::SelectHealthWorkerMilliSeconds, sw.elapsedMilliseconds());
+    }
 }
 
 InterserverIOHandler & Context::getInterserverIOHandler()
@@ -2334,7 +2309,7 @@ void Context::applySettingsChangesWithLock(const SettingsChanges & changes, bool
     {
         for (const auto & change : changes)
         {
-            if (!SettingsChanges::WHITELIST_SETTINGS.contains(change.name))
+            if (!SettingsChanges::WHITELIST_SETTINGS.contains(change.name) && !isExtraRestrictSettingsToWhitelist(change.name))
                 throw Exception(ErrorCodes::UNKNOWN_SETTING, "Unknown or disabled setting " + change.name +
                     "for tenant user. Contact the admin about whether it is needed to add it to tenant_whitelist_settings"
                     " in configuration");
@@ -4205,6 +4180,15 @@ StoragePolicyPtr Context::getStoragePolicy(const String & name) const
     return policy_selector->get(name);
 }
 
+StoragePolicyPtr Context::tryGetStoragePolicy(const String & name) const
+{
+    std::lock_guard lock(shared->storage_policies_mutex);
+
+    auto policy_selector = getStoragePolicySelector(lock);
+
+    return policy_selector->tryGet(name);
+}
+
 
 DisksMap Context::getDisksMap() const
 {
@@ -4564,6 +4548,18 @@ void Context::addRestrictSettingsToWhitelist(const std::vector<String>& setting_
         SettingsChanges::WHITELIST_SETTINGS.emplace(name);
 }
 
+void Context::setExtraRestrictSettingsToWhitelist(std::unordered_set<String>&& new_settings)
+{
+    std::lock_guard<std::mutex> lock(shared->extra_whitelist_settings_mutex);
+    shared->extra_whitelist_settings.swap(new_settings);
+}
+
+bool Context::isExtraRestrictSettingsToWhitelist(const String & name) const
+{
+    std::lock_guard<std::mutex> lock(shared->extra_whitelist_settings_mutex);
+    return shared->extra_whitelist_settings.find(name) != shared->extra_whitelist_settings.end();
+}
+
 bool Context::getBlockPrivilegedOp() const
 {
     return shared->restrict_tenanted_users_to_privileged_operations;
@@ -4747,7 +4743,7 @@ StorageID Context::resolveStorageID(StorageID storage_id, StorageNamespace where
     {
         if (auto worker_resource = tryGetCnchWorkerResource())
         {
-            if (auto storage = worker_resource->getTable(storage_id))
+            if (auto storage = worker_resource->tryGetTable(storage_id))
                 return storage->getStorageID();
         }
     }
@@ -5169,7 +5165,7 @@ void Context::setGINStoreReaderFactory(const GINStoreReaderFactorySettings & set
     if (shared->gin_store_reader_factory)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "GINStoreReaderFactory has already "
             "been created");
-    
+
     shared->gin_store_reader_factory = std::make_shared<GINStoreReaderFactory>(settings_);
 }
 
@@ -5835,7 +5831,11 @@ void Context::initCnchTransactionCoordinator()
 TransactionCoordinatorRcCnch & Context::getCnchTransactionCoordinator() const
 {
     auto lock = getLock(); // checked
-    return *shared->cnch_txn_coordinator;
+    if (auto * ptr = shared->cnch_txn_coordinator.get())
+    {
+        return *ptr;
+    }
+    throw Exception("CnchTransactionCoordinator is not initialized", ErrorCodes::SYSTEM_ERROR);
 }
 
 void Context::setCurrentTransaction(TransactionCnchPtr txn, bool finish_txn)
@@ -5912,12 +5912,6 @@ TxnTimestamp Context::getCurrentCnchStartTime() const
     if (!current_cnch_txn)
         throw Exception("Transaction is not set", ErrorCodes::LOGICAL_ERROR);
     return current_cnch_txn->getStartTime();
-}
-
-InterserverCredentialsPtr Context::getCnchInterserverCredentials()
-{
-    /// FIXME: any special for cnch ?
-    return getInterserverCredentials();
 }
 
 // In CNCH, form a virtual cluster which include all servers.

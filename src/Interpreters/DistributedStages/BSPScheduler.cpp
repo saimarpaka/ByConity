@@ -8,7 +8,9 @@
 #include <CloudServices/CnchServerResource.h>
 #include <bthread/mutex.h>
 #include <Poco/Logger.h>
+#include <Common/CurrentThread.h>
 #include <Common/ErrorCodes.h>
+#include <Common/ProfileEvents.h>
 #include <common/logger_useful.h>
 
 #include <Interpreters/DistributedStages/AddressInfo.h>
@@ -30,6 +32,11 @@
 #include <unordered_set>
 #include <utility>
 #include <CloudServices/CnchServerResource.h>
+
+namespace ProfileEvents
+{
+extern const Event QueryBspRetryCount;
+}
 
 namespace DB
 {
@@ -354,7 +361,7 @@ bool BSPScheduler::retryTaskIfPossible(size_t segment_id, UInt64 parallel_index,
     {
         std::unique_lock<std::mutex> lk(nodes_alloc_mutex);
         attempt_id = segment_instance_attempts[instance_id];
-        if (attempt_id >= query_context->getSettingsRef().bsp_max_retry_num)
+        if (attempt_id > query_context->getSettingsRef().bsp_max_retry_num)
             return false;
         auto running_worker_maybe = segment_parallel_locations[segment_id][parallel_index];
         if (!running_worker_maybe.has_value())
@@ -435,12 +442,13 @@ bool BSPScheduler::retryTaskIfPossible(size_t segment_id, UInt64 parallel_index,
             postEvent(std::make_shared<TriggerDispatchEvent>());
         }
     }
+    CurrentThread::getProfileEvents().increment(ProfileEvents::QueryBspRetryCount, 1);
     return true;
 }
 
 void BSPScheduler::workerRestarted(const WorkerId & id, const HostWithPorts & host_ports, UInt32 register_time)
 {
-    LOG_WARNING(log, "Worker {} restarted, retry all tasks running on it.", id.ToString());
+    LOG_WARNING(log, "Worker {} restarted, retry all tasks running on it.", id.toString());
     postHighPriorityEvent(std::make_shared<ResendResourceEvent>(host_ports));
     postEvent(std::make_shared<WorkerRestartedEvent>(id, register_time));
 }
@@ -483,7 +491,7 @@ void BSPScheduler::handleWorkerRestartedEvent(const ScheduleEvent & event)
                 {
                     stopped.store(true, std::memory_order_relaxed);
                     String error_msg = fmt::format(
-                        "Worker {} restared, segment instance {} failed", worker_restart_event.worker_id.ToString(), instance.toString());
+                        "Worker {} restared, segment instance {} failed", worker_restart_event.worker_id.toString(), instance.toString());
                     postEvent(std::make_shared<AbortEvent>(error_msg));
                 }
             }
@@ -634,7 +642,7 @@ void BSPScheduler::sendResourceRequest(const SegmentTaskInstance & instance, con
         ResourceRequest req{
             .segment_id = static_cast<UInt32>(instance.segment_id),
             .parallel_index = static_cast<UInt32>(instance.parallel_index),
-            .worker_id = worker_id.ToString(),
+            .worker_id = worker_id.toString(),
             .v_cpu = 1,
             .epoch = 0};
         postEvent(std::make_shared<SendResourceRequestEvent>(std::list{req}));

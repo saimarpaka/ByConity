@@ -1174,13 +1174,23 @@ int Server::main(const std::vector<std::string> & /*args*/)
             if (global_context->getServerType() == ServerType::cnch_server)
             {
                 global_context->updateQueueManagerConfig();
-                global_context->updateAdaptiveSchdulerConfig();
                 if (auto * auto_stats_manager = global_context->getAutoStatisticsManager())
                 {
                     auto_stats_manager->prepareNewConfig(*config);
                 }
 
                 global_context->setVWCustomizedSettings(std::make_shared<VWCustomizedSettings>(config));
+            }
+
+            if (global_context->getIsRestrictSettingsToWhitelist())
+            {
+                auto setting_names = getMultipleValuesFromConfig(*config, "tenant_whitelist_settings", "name");
+                std::unordered_set<String> setting_names_set;
+                for (auto& setting : setting_names)
+                {
+                    setting_names_set.emplace(setting);
+                }
+                global_context->setExtraRestrictSettingsToWhitelist(std::move(setting_names_set));
             }
 
             if (auto catalog = global_context->tryGetCnchCatalog())

@@ -144,10 +144,10 @@ endif()
 
 if (USE_HIVE)
     add_headers_and_sources(dbms Storages/Hive)
-    add_headers_and_sources(dbms Storages/Hive/HiveFile)
     add_headers_and_sources(dbms Storages/Hive/Metastore)
     add_headers_and_sources(dbms Storages/DataLakes)
-    add_headers_and_sources(dbms Storages/DataLakes/HiveFile)
+    add_headers_and_sources(dbms Storages/DataLakes/ScanInfo)
+    add_headers_and_sources(dbms Storages/DataLakes/Source)
 endif()
 
 add_headers_and_sources(dbms Protos)
@@ -744,7 +744,6 @@ if (ENABLE_TESTS AND USE_GTEST)
         ${GTEST_BOTH_LIBRARIES}
         clickhouse_functions
         clickhouse_aggregate_functions
-        clickhouse_parsers
         clickhouse_storages_system
         dbms
         clickhouse_common_zookeeper

@@ -314,7 +314,7 @@
     M(PerfFilterElapsedMicroseconds, "") \
 \
     M(QueryCreateTablesMicroseconds, "") \
-    M(QuerySendResourcesMicroseconds, "") \
+    M(QueryLoadResourcesMicroseconds, "") \
     M(CloudTableDefinitionCacheHits, "") \
     M(CloudTableDefinitionCacheMisses, "") \
 \
@@ -974,10 +974,11 @@
     \
     M(AllWorkerSize, "Total worker size of worker group") \
     M(HealthWorkerSize, "Number of worker which can execute any type plan segment") \
-    M(HeavyLoadWorkerSize, "Number of worker which can only execute source plan segment") \
-    M(SourceOnlyWorkerSize, "Number of worker which can only execute source plan segment") \
     M(UnhealthWorkerSize, "Number of unhealthy worker") \
-    M(NotConnectedWorkerSize, "Number of not connected worker size") \
+    M(OpenWorkerSize, "Number of open worker") \
+    M(UnknownWorkerSize, "Number of unknown worker") \
+    M(HalfSelfCheckWorkerSize, "Number of checking status worker") \
+    M(HalfOtherCheckWorkerSize, "Number of  worker checked by other sql ") \
     M(SelectHealthWorkerMilliSeconds, "Total time for select health worker") \
     \
     M(PreloadSubmitTotalOps, "Total count of preload submit by writer node") \
@@ -1002,6 +1003,30 @@
     M(ReadBufferFromRpcStreamFileConnect, "remote rpc file data connect count") \
     M(ReadBufferFromRpcStreamFileConnectFailed, "remote rpc file data connect failed count") \
     M(ReadBufferFromRpcStreamFileConnectMs, "remote rpc file data connect ms") \
+    \
+    M(CloudFSConnect, "The count of connecting CloudFS client") \
+    M(CloudFSConnectMicroseconds, "The time elapsed for connecting CloudFS client") \
+    M(CloudFSDisConnect, "The count of disconnecting CloudFS client") \
+    M(CloudFSDisConnectMicroseconds, "The time elapsed for disconnecting CloudFS client") \
+    M(ReadBufferFromCloudFSRead, "The count of ReadBufferFromCloudFS read op") \
+    M(ReadBufferFromCloudFSReadMicroseconds, "The time spent of ReadBufferFromCloudFS read from client") \
+    M(ReadBufferFromCloudFSFailed, "The failed count of ReadBufferFromCloudFS read op") \
+    M(ReadBufferFromCloudFSReadBytes, "Bytes size ReadBufferFromCloudFS read from client") \
+    M(ReadBufferFromCloudFSSessionGetMicroseconds, "The time spent of ReadBufferFromCloudFS client get session") \
+    M(ReadBufferFromCloudFSOpenFileMicroseconds, "The time spent of ReadBufferFromCloudFS client open file") \
+    M(ReadBufferFromCloudFSOpenFile, "The count of ReadBufferFromCloudFS client open file") \
+    M(ReadBufferFromCloudFSCloseFileMicroseconds, "The time spent of ReadBufferFromCloudFS client close file") \
+    M(ReadBufferFromCloudFSCloseFile, "The count of ReadBufferFromCloudFS client close file") \
+    \
+    M(WriteBufferFromCloudFSWrite, "The number of ops the WriteBufferFromCFS writes") \
+    M(WriteBufferFromCloudFSWriteBytes, "Bytes size WriteBufferFromCFS has written from client") \
+    M(WriteBufferFromCloudFSWriteMicroseconds, "The time elapsed by WriteBufferFromCFS writing from client") \
+    M(WriteBufferFromCloudFSSync, "The number of ops the WriteBufferFromCFS syncs") \
+    M(WriteBufferFromCloudFSSyncMicroseconds, "The time elapsed by WriteBufferFromCFS syncing files") \
+    M(WriteBufferFromCloudFSFailed, "The number of failed ops by the WriteBufferFromCFS") \
+    M(WriteBufferFromCloudFSOpenFile, "The number of ops the WriteBufferFromCFS try to open files") \
+    M(WriteBufferFromCloudFSCloseFile, "The number of ops the WriteBufferFromCFS tye to close files") \
+    M(WriteBufferFromCloudFSCloseFileMicroseconds, "The time elapsed by WriteBufferFromCFS closing files") \
     \
     M(IOSchedulerOpenFileMicro, "Time used in open file when using io scheduler") \
     M(IOSchedulerScheduleMicro, "Time used in schedule io request") \
@@ -1191,6 +1216,7 @@
 \
     M(NumberOfMarkRangesBeforeBeMergedInPKFilter, "Number of mark ranges in primary index filtering before adjacent ranges be merged into more bigger ranges") \
     M(PlanSegmentInstanceRetry, "How many times this plan segment has been retried, only valid under bsp mode") \
+    M(QueryBspRetryCount, "How many times the whole query has retried, only valid for server") \
 \
     M(OrcTotalStripes, "Total Stripes") \
     M(OrcReadStripes, "Total Read Stripes") \

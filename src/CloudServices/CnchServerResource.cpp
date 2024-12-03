@@ -26,7 +26,7 @@
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/WorkerStatusManager.h>
 #include <MergeTreeCommon/assignCnchParts.h>
-#include <Storages/Hive/HiveFile/IHiveFile.h>
+#include <Protos/cnch_worker_rpc.pb.h>
 #include <Storages/DataLakes/StorageCnchLakeBase.h>
 #include <brpc/controller.h>
 #include "Common/ProfileEvents.h"
@@ -35,6 +35,7 @@
 #include <Common/Exception.h>
 #include <common/logger_useful.h>
 
+#include <CloudServices/QueryResourceUtils.h>
 #include <Interpreters/DistributedStages/BSPScheduler.h>
 #include <Storages/RemoteFile/StorageCnchHDFS.h>
 #include <Storages/RemoteFile/StorageCnchS3.h>
@@ -64,7 +65,7 @@ AssignedResource::AssignedResource(AssignedResource & resource)
 
     server_parts = resource.server_parts;
     virtual_parts = resource.virtual_parts;
-    hive_parts = resource.hive_parts;
+    lake_scan_info_parts = resource.lake_scan_info_parts;
     file_parts = resource.file_parts;
     part_names = resource.part_names; // don't call move here
 
@@ -82,7 +83,7 @@ AssignedResource::AssignedResource(AssignedResource && resource)
 
     server_parts = std::move(resource.server_parts);
     virtual_parts = std::move(resource.virtual_parts);
-    hive_parts = std::move(resource.hive_parts);
+    lake_scan_info_parts = std::move(resource.lake_scan_info_parts);
     file_parts = std::move(resource.file_parts);
     part_names = resource.part_names; // don't call move here
 
@@ -114,18 +115,18 @@ void AssignedResource::addDataParts(ServerVirtualPartVector parts)
     }
 }
 
-void AssignedResource::addDataParts(const HiveFiles & parts)
+void AssignedResource::addDataParts(const LakeScanInfos & parts)
 {
     for (const auto & part : parts)
     {
-        auto [it, insert] = part_names.emplace(part->file_path);
+        auto [it, insert] = part_names.emplace(part->identifier());
         if (!insert) {
             // what to do here? if we addede duplicated file path
             // self join case may trigger the exception
             // throw Exception(ErrorCodes::BAD_ARGUMENTS, "Find duplicated part name '{}'", part->file_path);
         }
         else {
-            hive_parts.emplace_back(part);
+            lake_scan_info_parts.emplace_back(part);
         }
     }
 }
@@ -358,16 +359,16 @@ void CnchServerResource::resendResource(const ContextPtr & context, const HostWi
     std::vector<AssignedResource> resources_to_send;
     {
         auto lock = getLock();
-            ResourceOption resource_option{.resend = true};
-            allocateResource(context, lock, resource_option);
+        ResourceOption resource_option{.resend = true};
+        allocateResource(context, lock, resource_option);
 
-            std::unordered_map<HostWithPorts, std::vector<AssignedResource>> all_resources;
-            std::swap(all_resources, assigned_worker_resource);
-            auto it = all_resources.find(worker);
-            if (it == all_resources.end())
-                return;
+        std::unordered_map<HostWithPorts, std::vector<AssignedResource>> all_resources;
+        std::swap(all_resources, assigned_worker_resource);
+        auto it = all_resources.find(worker);
+        if (it == all_resources.end())
+            return;
 
-            resources_to_send = std::move(it->second);
+        resources_to_send = std::move(it->second);
     }
 
     Stopwatch rpc_watch;
@@ -405,7 +406,11 @@ void CnchServerResource::sendResources(const ContextPtr & context, std::optional
         initSourceTaskPayload(context, all_resources);
 
     Stopwatch rpc_watch;
+    auto worker_group_status = context->getWorkerGroupStatusPtr();
     auto handler = std::make_shared<ExceptionHandlerWithFailedInfo>();
+    if (worker_group_status && worker_group_status->needCheckHalfOpenWorker())
+        handler->setNeedRecord();
+    
     std::vector<brpc::CallId> call_ids;
     call_ids.reserve(all_resources.size());
 
@@ -439,23 +444,51 @@ void CnchServerResource::sendResources(const ContextPtr & context, std::optional
         brpc::Join(call_id);
     ProfileEvents::increment(ProfileEvents::CnchSendResourceRpcCallElapsedMilliseconds, rpc_watch.elapsedMilliseconds());
 
-    auto worker_group_status = context->getWorkerGroupStatusPtr();
     if (worker_group_status)
     {
         auto rpc_infos = handler->getFailedRpcInfo();
         for (const auto & [worker_id, error_code] : rpc_infos)
             context->getWorkerStatusManager()->setWorkerNodeDead(worker_id, error_code);
 
-        for (const auto & worker_id : worker_group_status->getHalfOpenWorkers())
+        for (const auto & worker_id : handler->getWorkers())
         {
-            if (rpc_infos.count(worker_id) == 0)
-                context->getWorkerStatusManager()->CloseCircuitBreaker(worker_id);
+            worker_group_status->removeHalfOpenWorker(worker_id);
         }
-        worker_group_status->clearHalfOpenWorkers();
     }
 
     handler->throwIfException();
     ProfileEvents::increment(ProfileEvents::CnchSendResourceElapsedMilliseconds, watch.elapsedMilliseconds());
+}
+
+
+void CnchServerResource::prepareQueryResourceBuf(
+    std::unordered_map<WorkerId, butil::IOBuf, WorkerIdHash> & resource_buf_map, const ContextPtr & context)
+{
+    std::unordered_map<HostWithPorts, std::vector<AssignedResource>> all_resources;
+    {
+        auto lock = getLock();
+        allocateResource(context, lock, std::nullopt);
+
+        if (!worker_group)
+            return;
+
+        std::swap(all_resources, assigned_worker_resource);
+    }
+
+    for (const auto & [worker_address, worker_resources] : all_resources)
+    {
+        auto worker_client = worker_group->getWorkerClient(worker_address);
+        auto worker_id = WorkerStatusManager::getWorkerId(worker_group->getVWName(), worker_group->getID(), worker_address.id);
+
+        Protos::QueryResource query_resource;
+        prepareQueryResource(query_resource, worker_id, worker_resources, context, send_mutations, log);
+
+        butil::IOBuf query_resource_buf;
+        butil::IOBufAsZeroCopyOutputStream wrapper(&query_resource_buf);
+        query_resource.SerializeToZeroCopyStream(&wrapper);
+        resource_buf_map[worker_id] = query_resource_buf.movable();
+        LOG_TRACE(log, "Worker id {} -> query resource size {}", worker_id.toString(), query_resource_buf.size());
+    }
 }
 
 void CnchServerResource::submitCustomTasks(const ContextPtr & context, WorkerAction act)
@@ -536,7 +569,7 @@ void CnchServerResource::allocateResource(
             BucketNumbersAssignmentMap assigned_bucket_map;
             ServerAssignmentMap assigned_map;
             VirtualPartAssignmentMap assigned_virtual_part_map;
-            HivePartsAssignMap assigned_hive_map;
+            LakeScanInfoPartsAssignMap assigned_lake_scan_info_map;
             FilePartsAssignMap assigned_file_map;
             ServerDataPartsVector bucket_parts;
             ServerDataPartsVector leftover_server_parts;
@@ -593,7 +626,7 @@ void CnchServerResource::allocateResource(
             }
             else if (auto * cnch_lake = dynamic_cast<StorageCnchLakeBase *>(storage.get()))
             {
-                assigned_hive_map = assignCnchHiveParts(worker_group, resource.hive_parts);
+                assigned_lake_scan_info_map = assignCnchLakeScanInfoParts(worker_group, resource.lake_scan_info_parts);
             }
             else if (auto * cnch_file = dynamic_cast<IStorageCnchFile *>(storage.get()))
             {
@@ -621,7 +654,7 @@ void CnchServerResource::allocateResource(
                 std::set<Int64> assigned_buckets;
                 ServerDataPartsVector assigned_parts;
                 ServerVirtualPartVector assigned_virtual_parts;
-                HiveFiles assigned_hive_parts;
+                LakeScanInfos assigned_lake_scan_info_parts;
                 FileDataPartsCNCHVector assigned_file_parts;
 
                 if (auto it = assigned_bucket_map.find(host_ports.id); it != assigned_bucket_map.end())
@@ -660,13 +693,13 @@ void CnchServerResource::allocateResource(
                     CnchPartsHelper::flattenPartsVector(assigned_virtual_parts);
                 }
 
-                if (auto it = assigned_hive_map.find(host_ports.id); it != assigned_hive_map.end())
+                if (auto it = assigned_lake_scan_info_map.find(host_ports.id); it != assigned_lake_scan_info_map.end())
                 {
-                    assigned_hive_parts = std::move(it->second);
+                    assigned_lake_scan_info_parts = std::move(it->second);
                     LOG_TRACE(
                         log,
                         "Allocate {} hive parts from table {} to {}",
-                        assigned_hive_parts.size(),
+                        assigned_lake_scan_info_parts.size(),
                         storage->getStorageID().getNameForLogs(),
                         host_ports.toDebugString());
                 }
@@ -685,7 +718,7 @@ void CnchServerResource::allocateResource(
                 bool empty = (resource.table_version == 0 || (use_bucket_assignment && assigned_buckets.empty()))
                         && assigned_parts.empty()
                         && assigned_virtual_parts.empty()
-                        && assigned_hive_parts.empty()
+                        && assigned_lake_scan_info_parts.empty()
                         && assigned_file_parts.empty();
 
                 if (!empty)
@@ -696,7 +729,7 @@ void CnchServerResource::allocateResource(
                 {
                     LOG_TRACE(
                         log,
-                        "SourcePrune skip stroage {} for host {}",
+                        "SourcePrune skip storage {} for host {}",
                         storage->getStorageID().getNameForLogs(),
                         host_ports.toDebugString());
                     continue;
@@ -713,7 +746,7 @@ void CnchServerResource::allocateResource(
 
                 worker_resource.addDataParts(assigned_parts);
                 worker_resource.addDataParts(std::move(assigned_virtual_parts));
-                worker_resource.addDataParts(assigned_hive_parts);
+                worker_resource.addDataParts(assigned_lake_scan_info_parts);
                 worker_resource.addDataParts(assigned_file_parts);
                 worker_resource.bucket_numbers = use_bucket_assignment ? assigned_buckets : required_bucket_numbers;
                 worker_resource.sent_create_query = resource.sent_create_query;

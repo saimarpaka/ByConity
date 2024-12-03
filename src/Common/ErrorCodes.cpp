@@ -21,6 +21,7 @@
 
 #include <Common/ErrorCodes.h>
 #include <Common/Exception.h>
+#include <Common/LabelledMetrics.h>
 #include <chrono>
 
 /** Previously, these constants were located in one enum.
@@ -814,6 +815,7 @@
     M(3010, TOO_MANY_PLAN_SEGMENTS) \
     M(3011, NO_AVAILABLE_MATERIALIZED_VIEW) \
     M(3012, TOO_MANY_JOINS) \
+    M(3014, OPTIMIZER_TEST_FAILED) \
 \
     M(4001, RESOURCE_GROUP_ILLEGAL_CONFIG) \
     M(4002, RESOURCE_NOT_ENOUGH) \
@@ -853,6 +855,7 @@
     M(5046, DISK_CACHE_NOT_USED) \
     M(5047, WORKER_RESTARTED) \
     M(5048, WORKER_NODE_NOT_FOUND) \
+    M(5049, WORKER_TABLE_NOT_FOUND) \
 \
     M(5453, HDFS_FILE_SYSTEM_UNREGISTER) \
     M(5454, BAD_HDFS_META_FILE) \
@@ -952,6 +955,10 @@
     M(4081, PLAN_CACHE_NOT_USED) \
     /* See END */
 
+namespace LabelledMetrics
+{
+    extern const Metric ErrorCodes;
+}
 namespace DB
 {
 namespace ErrorCodes
@@ -962,6 +969,7 @@ namespace ErrorCodes
 
     constexpr ErrorCode END = 13000;
     ErrorPairHolder values[END + 1]{};
+    static constexpr int ErrorCountReminder = 100;
 
     struct ErrorCodesNames
     {
@@ -1007,10 +1015,10 @@ namespace ErrorCodes
             error_code = end() - 1;
         }
 
-        values[error_code].increment(remote, message, trace);
+        values[error_code].increment(remote, message, trace, error_code);
     }
 
-    void ErrorPairHolder::increment(bool remote, const std::string & message, const FramePointers & trace)
+    void ErrorPairHolder::increment(bool remote, const std::string & message, const FramePointers & trace, ErrorCode error_code)
     {
         const auto now = std::chrono::system_clock::now();
 
@@ -1019,6 +1027,17 @@ namespace ErrorCodes
         auto & error = remote ? value.remote : value.local;
 
         ++error.count;
+        if ((error.count < ErrorCountReminder || error.count % ErrorCountReminder == 0) && !remote)
+        {
+            LabelledMetrics::MetricLabels labels;
+            std::string name(ErrorCodes::getName(error_code));
+            labels.insert({"name", name});
+            labels.insert({"error_code", std::to_string(error_code)});
+            if (error.count > ErrorCountReminder)
+                LabelledMetrics::increment(LabelledMetrics::ErrorCodes, 100, labels);
+            else
+                LabelledMetrics::increment(LabelledMetrics::ErrorCodes, 1, labels);
+        }
         error.message = message;
         error.trace = trace;
         error.error_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();

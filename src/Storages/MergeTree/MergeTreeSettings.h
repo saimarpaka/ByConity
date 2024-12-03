@@ -463,17 +463,20 @@ enum StealingCacheMode : UInt64
     M(Seconds, duplicate_repair_interval, 600, "Interval of check duplicate key", 0) \
     M(Bool, enable_unique_partial_update, false, "Enable partial update", 0) \
     M(Bool, enable_unique_row_store, false, "TODO: support further to enhance point query perf", 0) \
+    M(UInt64, partial_update_max_process_parts, 100, "Max process parts for partial update sub iteration", 0) \
+    M(UInt64, partial_update_max_process_rows, 15000000, "Max process rows for partial update sub iteration", 0) \
     M(MaxThreads, partial_update_query_parts_thread_size, 8, "The thread size of query data parts.", 0) \
     M(MaxThreads, partial_update_query_columns_thread_size, 1, "The thread size of query columns for each part.", 0) \
     M(MaxThreads, partial_update_replace_columns_thread_size, 8, "The thread size of replace columns.", 0) \
     M(Bool, partial_update_enable_merge_map, true, "Map row will just replace the original one when it's false. Otherwise, it will merge row.", 0) \
     M(Bool, partial_update_optimize_for_batch_task, true, "Optimize partial update process when _update_columns_ are all same for batch processing.", 0) \
+    M(Bool, partial_update_replace_if_not_null, false, "For partial update, this means the imported data will only be replaced when it is of non-null value.", 0) \
     M(DedupImplVersion, dedup_impl_version, DedupImplVersion::DEDUP_IN_WRITE_SUFFIX, "Choose different dedup impl version for unique table write process, current valid values: DEDUP_IN_WRITE_SUFFIX, DEDUP_IN_TXN_COMMIT.", 0) \
     M(DedupPickWorkerAlgo, dedup_pick_worker_algo, DedupPickWorkerAlgo::CONSISTENT_HASH, "", 0) \
     /** CI settings || test settings **/               \
     M(Bool, disable_dedup_parts, false, "Whether block the actual dedup progress.", 0) \
     M(Bool, partial_update_detail_logging, false, "Whether print some detailed troubleshooting information, only used for test scenarios.", 0) \
-    M(Bool, pick_first_worker_to_dedup, false, "[deprecated, use dedup_pick_worker_algo] Whether always pick the first worker(for dedup stage) in vw for stress test.", 0) \
+    M(Bool, pick_first_worker_to_dedup, false, "[Deprecated, use dedup_pick_worker_algo] Whether always pick the first worker(for dedup stage) in vw for stress test.", 0) \
     \
     /* Metastore settings */\
     M(Bool, enable_metastore, false, "Use KV metastore to manage data parts.", 0) \
@@ -483,7 +486,7 @@ enum StealingCacheMode : UInt64
     /** Obsolete settings. Kept for backward compatibility only. */ \
     \
     M(Bool, enable_local_disk_cache, true, "Enable local disk cache", 0) \
-    M(Bool, enable_cloudfs, false, "CROSS feature for table level setting", 0) \
+    M(Bool, enable_cloudfs, false, "Enable cloudfs; disabled by default", 0) \
     M(Bool, enable_nexus_fs, false, "Enable local NexusFS", 0) \
     /*keep enable_preload_parts for compitable*/\
     M(Bool, enable_preload_parts, false, "Enable preload parts", 0) \
@@ -516,7 +519,7 @@ enum StealingCacheMode : UInt64
     M(UInt64, cnch_merge_round_robin_partitions_interval, 300, "", 0) \
     M(UInt64, cnch_gc_round_robin_partitions_interval, 600, "", 0) \
     M(UInt64, cnch_gc_round_robin_partitions_number, 10, "", 0) \
-    M(UInt64, cnch_meta_rpc_timeout_ms, 8000, "", 0) \
+    M(UInt64, cnch_meta_rpc_timeout_ms, 8000, "The timeout of meta related rpc, including parts/delete_bitmaps/partitions meta", 0) \
     M(Bool, gc_ignore_running_transactions_for_test, false, "Ignore running transactions when calculating gc timestamp. Useful for tests only.", 0) \
     M(UInt64, gc_trash_part_batch_size, 5000, "Batch size to remove stale parts to trash in background tasks", 0) \
     M(UInt64, gc_trash_part_limit, 0, "Maximum number of stale parts to process per GC round, zero means no limit", 0) \
@@ -551,6 +554,8 @@ enum StealingCacheMode : UInt64
     \
     M(String, column_compress_block_settings, "", "Column compressed block size for each column, if not specified, use max_compress_block_size.", 0) \
     M(UInt64, filtered_ratio_to_use_skip_read, 0, "Ratio of origin rows to filtered rows when using skip reading, 0 means disable", 0) \
+    M(UInt64, low_cardinality_ndv_threshold, 100000, "Threshold for fallback to none encoded column from low cardinality column, 0 disable", 0) \
+    M(Bool, low_cardinality_force_fallback, true, "Force fallback if low cardinality column has cardinality greater than low_cardinality_ndv_threshold", 0) \
 
     /// Settings that should not change after the creation of a table.
 #define APPLY_FOR_IMMUTABLE_MERGE_TREE_SETTINGS(M) \

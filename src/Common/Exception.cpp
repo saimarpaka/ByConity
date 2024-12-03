@@ -23,8 +23,10 @@
 
 #include <string.h>
 #include <cxxabi.h>
+#include <atomic>
 #include <cstdlib>
 #include <Poco/String.h>
+#include <common/getFQDNOrHostName.h>
 #include <common/logger_useful.h>
 #include <IO/WriteHelpers.h>
 #include <IO/ReadHelpers.h>
@@ -173,6 +175,9 @@ std::string Exception::displayText() const
     if (!message().empty())
     {
         txt.append(": ");
+        txt.append("host = ");
+        txt.append(getFQDNOrHostName());
+        txt.append(": ");
         txt.append(message());
         txt.append(" SQLSTATE: ");
         txt.append(ErrorCodes::getSqlState(code()));
@@ -182,12 +187,12 @@ std::string Exception::displayText() const
 
 void throwFromErrno(const std::string & s, int code, int the_errno)
 {
-    throw ErrnoException(s + ", " + errnoToString(code, the_errno), code, the_errno);
+    throw ErrnoException("host = " + getPodOrHostName() + ": " + s + ", " + errnoToString(code, the_errno), code, the_errno);
 }
 
 void throwFromErrnoWithPath(const std::string & s, const std::string & path, int code, int the_errno)
 {
-    throw ErrnoException(s + ", " + errnoToString(code, the_errno) + ", path = " + path, code, the_errno, path);
+    throw ErrnoException("host = " + getPodOrHostName() + ": " + s + ", " + errnoToString(code, the_errno) + ", path = " + path, code, the_errno, path);
 }
 
 template <typename T>
@@ -695,9 +700,14 @@ void ExceptionHandler::throwIfException()
         std::rethrow_exception(first_exception);
 }
 
+bool ExceptionHandler::testException()
+{
+    bool expected_value = false;
+    return has_exception.compare_exchange_strong(expected_value, true);
+}
+
 bool ExceptionHandler::hasException() const
 {
-    std::unique_lock lock(mutex);
-    return first_exception != nullptr;
+    return has_exception;
 }
 }

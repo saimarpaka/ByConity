@@ -584,7 +584,8 @@ protected:
     mutable std::unordered_set<std::string> nondeterministic_functions_out_of_query_scope;
 
     // worker status
-    WorkerGroupStatusPtr worker_group_status;
+    mutable WorkerGroupStatusPtr worker_group_status;
+    mutable WorkerStatusManagerPtr worker_status_manager;
 
     std::shared_ptr<OptimizerProfile> optimizer_profile = nullptr;
     /// Temporary data for query execution accounting.
@@ -625,7 +626,6 @@ protected:
     /// VirtualWarehouse for each query, session level
     mutable VirtualWarehouseHandle current_vw;
     mutable WorkerGroupHandle current_worker_group;
-    mutable WorkerGroupHandle health_worker_group;
 
     DequeueReleasePtr dequeue_ptr;
     /// Transaction for each query, query level
@@ -833,14 +833,13 @@ public:
 
     void checkAeolusTableAccess(const String & database_name, const String & table_name) const;
 
-    WorkerGroupStatusPtr & getWorkerGroupStatusPtr() { return worker_group_status; }
     const WorkerGroupStatusPtr & getWorkerGroupStatusPtr() const { return worker_group_status; }
 
     void updateAdaptiveSchdulerConfig();
-    WorkerStatusManagerPtr getWorkerStatusManager();
     WorkerStatusManagerPtr getWorkerStatusManager() const;
-    WorkerGroupHandle tryGetHealthWorkerGroup() const;
-    void selectWorkerNodesWithMetrics();
+    void  setWorkerStatusManager();
+
+    void adaptiveSelectWorkers(SchedulerMode mode);
 
     ASTPtr getRowPolicyCondition(const String & database, const String & table_name, RowPolicy::ConditionType type) const;
 
@@ -1399,6 +1398,7 @@ public:
 
     /// Provides storage politics schemes
     StoragePolicyPtr getStoragePolicy(const String & name) const;
+    StoragePolicyPtr tryGetStoragePolicy(const String & name) const;
 
     /// Get the server uptime in seconds.
     time_t getUptimeSeconds() const;
@@ -1429,6 +1429,8 @@ public:
     bool getIsRestrictSettingsToWhitelist() const;
     void setIsRestrictSettingsToWhitelist(bool is_restrict);
     void addRestrictSettingsToWhitelist(const std::vector<String>& name) const;
+    void setExtraRestrictSettingsToWhitelist(std::unordered_set<String>&& settings);
+    bool isExtraRestrictSettingsToWhitelist(const String & name) const;
 
     bool getBlockPrivilegedOp() const;
     void setBlockPrivilegedOp(bool is_restrict);
@@ -1696,7 +1698,6 @@ public:
 
     std::multimap<StorageID, MergeTreeMutationStatus> collectMutationStatusesByTables(std::unordered_set<UUID> table_uuids) const;
 
-    InterserverCredentialsPtr getCnchInterserverCredentials();
     std::shared_ptr<Cluster> mockCnchServersCluster() const;
 
     std::vector<std::pair<UInt64, CnchWorkerResourcePtr>> getAllWorkerResources() const;

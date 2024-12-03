@@ -95,7 +95,6 @@ public:
 
     String toString();
     String toString(const std::unique_lock<Mutex> &);
-    String toStringSimple() const;
 
 private:
     friend class BufferManager;
@@ -120,6 +119,7 @@ public:
         InodeManager & inode_manager_
     );
     static BufferManager * getInstance();
+    static void destroy();
 
     explicit BufferManager(
         size_t buffer_size_,

@@ -43,7 +43,6 @@ void registerDiskHDFS(DiskFactory & factory);
 void registerDiskByteHDFS(DiskFactory & factory);
 #endif
 
-
 void registerDisks()
 {
     auto & factory = DiskFactory::instance();
@@ -60,6 +59,7 @@ void registerDisks()
     registerDiskHDFS(factory);
     registerDiskByteHDFS(factory);
 #endif
+
 }
 
 }

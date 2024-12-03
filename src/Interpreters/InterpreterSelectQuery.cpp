@@ -168,8 +168,10 @@ String InterpreterSelectQuery::generateFilterActions(ActionsDAGPtr & actions, co
     select_ast->setExpression(ASTSelectQuery::Expression::SELECT, std::make_shared<ASTExpressionList>());
     auto expr_list = select_ast->select();
 
-    // The first column is our filter expression.
-    expr_list->children.push_back(row_policy_filter);
+    /// The first column is our filter expression.
+    /// the row_policy_filter should be cloned, because it may be changed by TreeRewriter.
+    /// which make it possible an invalid expression, although it may be valid in whole select.
+    expr_list->children.push_back(row_policy_filter->clone());
 
     /// Keep columns that are required after the filter actions.
     for (const auto & column_str : prerequisite_columns)
@@ -453,6 +455,11 @@ InterpreterSelectQuery::InterpreterSelectQuery(
         ASTPtr view_table;
         if (view)
             view->replaceWithSubquery(getSelectQuery(), view_table, metadata_snapshot);
+
+        /// for bitmap expression aggregate functions
+        /// for example, bitmapCount('1 | 2 & 3')(a, b), we will construct 'a in (1, 2, 3)' expression to where
+        if (context->getServerType() == ServerType::cnch_server)
+            optimizeBitMapParametersToWhere(query_ptr, metadata_snapshot);
 
         syntax_analyzer_result = TreeRewriter(context).analyzeSelect(
             query_ptr,
@@ -2589,6 +2596,7 @@ void InterpreterSelectQuery::executeAggregation(QueryPlan & query_plan, const Ac
         NameSet{},
         std::move(grouping_sets_params),
         final,
+        AggregateStagePolicy::DEFAULT,
         settings.max_block_size,
         merge_threads,
         temporary_data_merge_threads,

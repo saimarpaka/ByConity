@@ -20,6 +20,9 @@ skip_case_list = (
     ## unstable case, ok to skip
     '00696_system_columns_limit',
 
+    ## nullable(map) maybe not supported in clickhouse_driver
+    '03034_nullable_map',
+    '52018_mysql_map',
 )
 
 skip_keyword_list = (
@@ -54,6 +57,7 @@ skip_error = (
 )
 
 allowed_error_code = (
+    36,
     43,
     47,
     48,
@@ -414,4 +418,3 @@ if __name__ == "__main__":
 
     if not res==0:
         exit(1)
-

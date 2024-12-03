@@ -64,8 +64,8 @@ struct ClusterNodes
     {
         // Pick workers per policy.
         AdaptiveScheduler adaptive_scheduler(query_context);
-        rank_worker_ids = query_context->getSettingsRef().enable_adaptive_scheduler ? adaptive_scheduler.getHealthyWorkerRank()
-                                                                                    : adaptive_scheduler.getRandomWorkerRank();
+        rank_worker_ids = query_context->getSettingsRef().scheduler_mode != SchedulerMode::SKIP ? adaptive_scheduler.getHealthyWorkerRank()
+                                                                                                : adaptive_scheduler.getRandomWorkerRank();
 
 
         const auto & worker_group = query_context->tryGetCurrentWorkerGroup();
@@ -91,12 +91,12 @@ struct ClusterNodes
 
 struct NodeSelectorResult;
 void divideSourceTaskByBucket(
-    const std::unordered_map<AddressInfo, SourceTaskPayloadOnWorker, AddressInfo::Hash> & payloads,
+    std::unordered_map<AddressInfo, SourceTaskPayloadOnWorker, AddressInfo::Hash> & payloads,
     size_t weight_sum,
     size_t parallel_size,
     NodeSelectorResult & result);
 void divideSourceTaskByPart(
-    const std::unordered_map<AddressInfo, SourceTaskPayloadOnWorker, AddressInfo::Hash> & payloads,
+    std::unordered_map<AddressInfo, SourceTaskPayloadOnWorker, AddressInfo::Hash> & payloads,
     size_t weight_sum,
     size_t parallel_size,
     NodeSelectorResult & result);

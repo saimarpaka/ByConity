@@ -65,6 +65,7 @@
 #include <QueryPlan/WindowStep.h>
 #include <QueryPlan/planning_common.h>
 #include <Common/FieldVisitors.h>
+#include <AggregateFunctions/AggregateFunctionFactory.h>
 
 #include <algorithm>
 #include <memory>
@@ -215,6 +216,7 @@ private:
 
 namespace
 {
+    void planFinalResult(RelationPlan & plan, ContextMutablePtr context);
     PlanNodePtr planOutfile(PlanNodePtr output_root, Analysis & analysis, ContextMutablePtr context)
     {
         auto & outfile_info = analysis.getOutfileInfo();
@@ -233,11 +235,11 @@ namespace
         return output_root;
     }
 
-    PlanNodePtr planOutput(const RelationPlan & plan, ASTPtr & query, Analysis & analysis, ContextMutablePtr context)
+    PlanNodePtr planOutput(RelationPlan & plan, ASTPtr & query, Analysis & analysis, ContextMutablePtr context)
     {
         const auto & output_desc = analysis.getOutputDescription(*query);
         const auto & field_symbol_infos = plan.getFieldSymbolInfos();
-        const auto old_root = plan.getRoot();
+        auto old_root = plan.getRoot();
 
         Assignments assignments;
         NameToType input_types = old_root->getOutputNamesToTypes();
@@ -274,6 +276,19 @@ namespace
             output_types[output_name] = input_types[input_column];
         }
 
+        if (context->getSettingsRef().final_order_by_all_direction || context->getSettingsRef().limit || context->getSettingsRef().offset)
+        {
+            // Ensure the order of output columns
+            if (context->getSettingsRef().final_order_by_all_direction != 0)
+            {
+                auto output_step = std::make_shared<ProjectionStep>(old_root->getCurrentDataStream(), assignments, output_types, false);
+                old_root = old_root->addStep(context->nextNodeId(), std::move(output_step));
+            }
+            planFinalResult(plan, context);
+            old_root = plan.getRoot();
+            PRINT_PLAN(old_root, setting_sorting_limit_offset);
+        }
+
         auto output_step = std::make_shared<ProjectionStep>(old_root->getCurrentDataStream(), assignments, output_types, true);
         auto output_root = old_root->addStep(context->nextNodeId(), std::move(output_step));
 
@@ -289,6 +304,38 @@ namespace
             auto extremes_step = std::make_shared<ExtremesStep>(plan.getRoot()->getCurrentDataStream());
             auto extremes = plan.getRoot()->addStep(context->nextNodeId(), std::move(extremes_step));
             plan.withNewRoot(extremes);
+        }
+    }
+
+    void planFinalResult(RelationPlan & plan, ContextMutablePtr context)
+    {
+        if (context->getSettingsRef().final_order_by_all_direction != 0)
+        {
+            int direction = context->getSettingsRef().final_order_by_all_direction > 0 ? 1 : -1;
+            // build sort description
+            SortDescription sort_description;
+            for (const auto & item : plan.getRoot()->getOutputNames())
+                sort_description.emplace_back(item, direction, 1);
+            auto limit = context->getSettingsRef().limit + context->getSettingsRef().offset;
+            auto sorting_step = std::make_shared<SortingStep>(plan.getRoot()->getCurrentDataStream(), sort_description, limit, SortingStep::Stage::FULL, SortDescription{});
+            auto sorting_root = plan.getRoot()->addStep(context->nextNodeId(), std::move(sorting_step));
+            plan.withNewRoot(sorting_root);
+        }
+
+        if (context->getSettingsRef().limit > 0)
+        {
+            UInt64 limit_length = context->getSettingsRef().limit;
+            UInt64 limit_offset = context->getSettingsRef().offset > 0 ? context->getSettingsRef().offset : 0;
+            auto limit_step = std::make_shared<LimitStep>(plan.getRoot()->getCurrentDataStream(), limit_length, limit_offset);
+            auto limit_root = plan.getRoot()->addStep(context->nextNodeId(), std::move(limit_step));
+            plan.withNewRoot(limit_root);
+        }
+        else if (context->getSettingsRef().offset > 0)
+        {
+            UInt64 offset = context->getSettingsRef().offset ;
+            auto offset_step = std::make_unique<OffsetStep>(plan.getRoot()->getCurrentDataStream(), offset);
+            auto offset_root = plan.getRoot()->addStep(context->nextNodeId(), std::move(offset_step));
+            plan.withNewRoot(offset_root);
         }
     }
 }
@@ -1243,13 +1290,7 @@ void QueryPlannerVisitor::planArrayJoin(ASTArrayJoin & array_join, PlanBuilder &
 {
     const auto & array_join_analysis = analysis.getArrayJoinAnalysis(select_query);
     const auto & array_join_descs = array_join_analysis.descriptions;
-    ASTs array_join_exprs;
-    array_join_exprs.reserve(array_join_descs.size());
-
-    for (const auto & desc : array_join_descs)
-        array_join_exprs.push_back(desc.expr);
-
-    auto symbols = builder.applyProjection(array_join_exprs);
+    auto symbols = builder.applyArrayJoinProjection(array_join_descs);
     auto array_join_action
         = std::make_shared<ArrayJoinAction>(NameSet{symbols.begin(), symbols.end()}, array_join_analysis.is_left_array_join, context);
     auto array_join_step = std::make_shared<ArrayJoinStep>(builder.getCurrentDataStream(), array_join_action);
@@ -1262,11 +1303,7 @@ void QueryPlannerVisitor::planArrayJoin(ASTArrayJoin & array_join, PlanBuilder &
         const auto & symbol = symbols[i];
 
         if (!desc.create_new_field)
-        {
-            auto col_ref = analysis.tryGetColumnReference(desc.expr);
-            assert(col_ref.has_value());
-            new_symbol_infos[col_ref->hierarchy_index] = FieldSymbolInfo(symbol);
-        }
+            new_symbol_infos[std::get<size_t>(desc.source)] = FieldSymbolInfo(symbol);
         else
             new_symbol_infos.emplace_back(symbol);
     }
@@ -1423,6 +1460,31 @@ void QueryPlannerVisitor::planAggregate(PlanBuilder & builder, ASTSelectQuery & 
     for (const auto & grouping_set : group_by_analysis.grouping_sets)
         process_grouping_set(grouping_set);
 
+    if (!context->getSettingsRef().only_full_group_by)
+    {
+        auto name_to_types_before_group_by = builder.getOutputNamesToTypes();
+        const auto & field_symbols_before_group = builder.getFieldSymbolInfos();
+        for (size_t i = 0; i < field_symbols_before_group.size(); ++i)
+        {
+            const auto & field_symbol = field_symbols_before_group.at(i).primary_symbol;
+            if (!field_symbol.empty() && visible_fields.at(i).primary_symbol.empty() && name_to_types_before_group_by.contains(field_symbol))
+            {
+                Array parameters;
+                AggregateFunctionProperties properties;
+                DataTypes data_types{name_to_types_before_group_by.at(field_symbol)};
+                AggregateFunctionPtr any_agg_fun = AggregateFunctionFactory::instance().get("any", data_types, parameters, properties);
+                AggregateDescription any_agg_func_desc;
+                any_agg_func_desc.function = any_agg_fun;
+                auto any_column_name = context->getSymbolAllocator()->newSymbol(field_symbol);
+                any_agg_func_desc.column_name = any_column_name;
+                any_agg_func_desc.argument_names = {field_symbol};
+                any_agg_func_desc.parameters = parameters;
+                aggregate_descriptions.push_back(any_agg_func_desc);
+                visible_fields[i] = any_column_name;
+            }
+        }
+    }
+
     builder.withNewMappings(visible_fields, complex_expressions);
 
     if (select_query.group_by_with_rollup)
@@ -1455,6 +1517,7 @@ void QueryPlannerVisitor::planAggregate(PlanBuilder & builder, ASTSelectQuery & 
         aggregate_descriptions,
         select_query.group_by_with_grouping_sets || grouping_sets_params.size() > 1 ? grouping_sets_params : GroupingSetsParamsList{},
         !select_query.group_by_with_totals, // when WITH TOTALS exists, TotalsHavingStep is to finalize aggregates
+        AggregateStagePolicy::DEFAULT,
         SortDescription{},
         grouping_operations_descs,
         needAggregateOverflowRow(select_query),

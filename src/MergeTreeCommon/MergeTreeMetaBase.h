@@ -42,6 +42,7 @@ class MergeTreeMetaBase : public IStorage, public WithMutableContext, public Mer
 public:
     constexpr static auto FORMAT_VERSION_FILE_NAME = "format_version.txt";
     constexpr static auto DETACHED_DIR_NAME = "detached";
+    constexpr static auto CLOUDFS_STORAGE_POLICY_SUFFIX = "_with_cloudfs";
 
     SourceTaskFilter source_task_filter;
 
@@ -426,6 +427,10 @@ public:
 
     MergeTreeSettingsPtr getChangedSettings(const ASTPtr new_settings) const;
     void checkMetadataValidity(const ColumnsDescription & columns, const ASTPtr & new_settings = nullptr) const override;
+    
+    /// Some data types (like Map) may have extra constrains in storage and need to be compatible with tables in earlier versions. 
+    /// We only check this when creating tables and adding/modifying these columns.
+    static void checkTypeInComplianceWithRecommendedUsage(const DataTypePtr & type);
 
     virtual bool supportsOptimizer() const override { return true; }
 

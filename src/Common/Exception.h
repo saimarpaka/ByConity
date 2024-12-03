@@ -21,7 +21,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <cerrno>
+#include <unordered_set>
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -265,10 +267,12 @@ class ExceptionHandler
 public:
     bool setException(std::exception_ptr && exception);
     void throwIfException();
+    bool testException();
     bool hasException() const;
 
 protected:
     std::exception_ptr first_exception;
+    std::atomic<bool> has_exception{false};
     mutable std::mutex mutex;
 };
 
@@ -283,11 +287,22 @@ public:
         std::unique_lock lock(mutex);
         failed_rpc_info.emplace(worker_id, error_code);
     }
-
+    void setNeedRecord() { record_all_workers = true; }
+    void addWorker(const WorkerId & id)
+    {
+        if (record_all_workers)
+        {
+            std::unique_lock lock(mutex);
+            workers.emplace(id);
+        }
+    }
     const WorkerIdErrorCodeMap & getFailedRpcInfo() { return failed_rpc_info; }
+    const WorkerNodeSet & getWorkers() { return workers; }
 
 private:
     WorkerIdErrorCodeMap failed_rpc_info;
+    bool record_all_workers{false};
+    WorkerNodeSet workers;
 };
 
 using ExceptionHandlerWithFailedInfoPtr = std::shared_ptr<ExceptionHandlerWithFailedInfo>;

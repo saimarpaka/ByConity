@@ -10,14 +10,14 @@ struct WorkerId
     String vw_name;
     String wg_name;
     String id;
-    const String ToString() const
+    const String toString() const
     {
         return vw_name + "." + wg_name + "." + id;
     }
 
     inline bool operator==(WorkerId const & rhs) const
     {
-        return (this->vw_name == rhs.vw_name && this->wg_name == wg_name && this->id == id);
+        return vw_name == rhs.vw_name && wg_name == rhs.wg_name && id == rhs.id;
     }
 
 };
@@ -26,8 +26,10 @@ struct WorkerIdHash
 {
     std::size_t operator()(const WorkerId & worker_id) const
     {
-        return std::hash<String>()(worker_id.ToString());
+        return std::hash<String>()(worker_id.toString());
     }
 };
+
+using WorkerNodeSet = std::unordered_set<WorkerId, WorkerIdHash>;
 
 } // namespace DB

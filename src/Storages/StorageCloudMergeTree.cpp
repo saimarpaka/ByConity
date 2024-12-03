@@ -114,8 +114,6 @@ void StorageCloudMergeTree::read(
 {
     if (data_version)
         prepareVersionedPartsForRead(local_context, query_info, column_names);
-    else
-        prepareDataPartsForRead();
 
     if (auto plan = MergeTreeDataSelectExecutor(*this).read(
             column_names, storage_snapshot, query_info, local_context, max_block_size, num_streams, processed_stage))
@@ -276,10 +274,23 @@ MutationCommands StorageCloudMergeTree::getFirstAlterMutationCommandsForPart(con
 
 StoragePolicyPtr StorageCloudMergeTree::getStoragePolicy(StorageLocation location) const
 {
-    String policy_name = (location == StorageLocation::MAIN ?
-        getSettings()->storage_policy :
-        getContext()->getCnchAuxilityPolicyName());
-    return getContext()->getStoragePolicy(policy_name);
+    if (location == StorageLocation::MAIN)
+    {
+        if (getSettings()->enable_cloudfs)
+        {
+            /// This will be used for compatibility with old version of Cross (bundled with DiskByteHDFS)
+            const String & storage_policy_name = getSettings()->storage_policy.value + CLOUDFS_STORAGE_POLICY_SUFFIX;
+            auto policy = getContext()->tryGetStoragePolicy(storage_policy_name);
+            if (policy)
+                return policy;
+            else
+                LOG_WARNING(log, "Storage Policy {} is not found and will fallback to use ufs storage policy", storage_policy_name);
+        }
+
+        return getContext()->getStoragePolicy(getSettings()->storage_policy);
+    }
+    else
+        return getContext()->getStoragePolicy(getContext()->getCnchAuxilityPolicyName());
 }
 
 const String& StorageCloudMergeTree::getRelativeDataPath(StorageLocation location) const
